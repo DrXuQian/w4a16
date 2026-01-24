@@ -1,0 +1,2 @@
+/usr/bin/ar qc libmarlin_sm110_kernel.a CMakeFiles/marlin_sm110_kernel.dir/marlin_sm110_kernel.cu.o CMakeFiles/marlin_sm110_kernel.dir/marlin_runner.cu.o
+/usr/bin/ranlib libmarlin_sm110_kernel.a
