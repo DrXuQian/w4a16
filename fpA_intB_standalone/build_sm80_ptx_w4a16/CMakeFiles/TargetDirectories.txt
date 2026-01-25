@@ -1,4 +1,0 @@
-/home/qianxu/w4a16/fpA_intB_standalone/build_sm80_ptx_w4a16/CMakeFiles/fpA_intB_gemm.dir
-/home/qianxu/w4a16/fpA_intB_standalone/build_sm80_ptx_w4a16/CMakeFiles/test_fpA_intB_gemm.dir
-/home/qianxu/w4a16/fpA_intB_standalone/build_sm80_ptx_w4a16/CMakeFiles/edit_cache.dir
-/home/qianxu/w4a16/fpA_intB_standalone/build_sm80_ptx_w4a16/CMakeFiles/rebuild_cache.dir

@@ -1,1 +1,0 @@
-/usr/local/cuda-12.8/bin/nvcc -forward-unknown-to-host-compiler  --generate-code=arch=compute_120,code=[compute_120,sm_120] -Xcompiler=-fPIC -Wno-deprecated-gpu-targets -shared -dlink CMakeFiles/test_marlin_sm110.dir/test/test_marlin_sm110.cu.o -o CMakeFiles/test_marlin_sm110.dir/cmake_device_link.o  libmarlin_sm110_kernel.a  -lcudadevrt -lcudart_static -lrt -lpthread -ldl 
