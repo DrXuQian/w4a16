@@ -16,6 +16,13 @@ cmake -S . -B build
 cmake --build build -j
 ```
 
+By default this builds for SM110. Override when building on a different GPU, e.g.:
+
+```
+cmake -S . -B build -DCMAKE_CUDA_ARCHITECTURES=120
+cmake --build build -j
+```
+
 This produces `libmarlin_sm110_kernel.a` and the test executable.
 
 ## Test

@@ -123,3 +123,16 @@ Notes
 - K must be a multiple of 64 (SM80 fpA_intB requirement) and group_size.
 - The CUDA fallback only supports M in [1, 15].
 - CPU reference is a simple sanity check (not a full correctness suite).
+
+SM110/SM120 behavior
+--------------------
+This standalone extraction only implements the SM80 CUTLASS fpA_intB kernel path (plus the CUDA fallback).
+On SM110/SM120 GPUs, the runner intentionally dispatches to the SM80 implementation (i.e. no SM90/SM100/SM120
+specialized CUTLASS kernels are included here).
+
+If you are building on a non-SM80 GPU, override the build arch, e.g.:
+
+```
+cmake -S fpA_intB_standalone -B fpA_intB_standalone/build -DCMAKE_CUDA_ARCHITECTURES=110
+cmake --build fpA_intB_standalone/build -j8
+```
