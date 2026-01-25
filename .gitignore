@@ -1,0 +1,23 @@
+# Build directories / artifacts
+**/build/
+**/build*/
+**/CMakeFiles/
+**/CMakeCache.txt
+**/cmake_install.cmake
+**/Makefile
+**/*.o
+**/*.obj
+**/*.a
+**/*.so
+**/*.dylib
+**/*.dll
+**/*.exe
+**/*.pdb
+**/*.lib
+**/*.exp
+**/*.cubin
+**/*.fatbin
+**/*.ptx
+**/*.sass
+**/*.d
+
