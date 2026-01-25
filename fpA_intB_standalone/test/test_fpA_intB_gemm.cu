@@ -26,6 +26,9 @@ struct Args
     int group_size = 128;
     int warmup = 10;
     int iters = 100;
+    bool warmup_set = false;
+    bool iters_set = false;
+    bool ncu_mode = false;
     bool verify = false;
     bool list_configs = false;
     bool force_config = false;
@@ -37,7 +40,7 @@ void print_usage(char const* name)
 {
     std::printf(
         "Usage: %s [--m=N] [--n=N] [--k=N] [--group_size=N] [--warmup=N] [--iters=N] [--verify] [--list_configs] "
-        "[--config=cuda|tile_m,tile_n,tile_k,stages,split_k]\n",
+        "[--config=cuda|tile_m,tile_n,tile_k,stages,split_k] [--ncu]\n",
         name);
 }
 
@@ -170,10 +173,17 @@ void parse_args(int argc, char** argv, Args& args)
         }
         if (parse_int(argv[i], "--warmup=", args.warmup))
         {
+            args.warmup_set = true;
             continue;
         }
         if (parse_int(argv[i], "--iters=", args.iters))
         {
+            args.iters_set = true;
+            continue;
+        }
+        if (std::strcmp(argv[i], "--ncu") == 0)
+        {
+            args.ncu_mode = true;
             continue;
         }
         if (std::strcmp(argv[i], "--verify") == 0)
@@ -335,6 +345,24 @@ int main(int argc, char** argv)
     {
         print_all_configs();
         return 0;
+    }
+
+    if (args.ncu_mode)
+    {
+        // In ncu mode we avoid a separate warmup loop, and rely on ncu's
+        // --launch-skip/--launch-count to profile a single steady-state launch.
+        args.warmup = 0;
+        if (!args.iters_set)
+        {
+            args.iters = 1000;
+        }
+        if (!args.force_config)
+        {
+            std::fprintf(stderr,
+                "Error: --ncu requires --config=... to avoid profiling-style config search.\n"
+                "       First run without --ncu to pick a config, then rerun with --ncu --config=...\n");
+            return 1;
+        }
     }
 
     if (args.m <= 0 || args.n <= 0 || args.k <= 0)

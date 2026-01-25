@@ -30,6 +30,12 @@ This produces `libmarlin_sm110_kernel.a` and the test executable.
 ./build/test_marlin_sm110 --m=1 --n=2048 --k=2048 --group_size=128
 ```
 
+NCU mode (profile one iteration):
+
+```
+./build/test_marlin_sm110 --m=1 --n=2048 --k=2048 --group_size=128 --ncu --iters=2000
+```
+
 List compiled configs:
 ```
 ./build/test_marlin_sm110 --list_configs

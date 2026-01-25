@@ -859,6 +859,7 @@ void print_usage(const char* prog_name) {
   printf("  -s <sms>        Number of SMs to use, -1 for auto (default: -1)\n");
   printf("  -w <warmup>     Warmup iterations (default: 10)\n");
   printf("  -i <iters>      Timed iterations (default: 100)\n");
+  printf("  --ncu           Nsight Compute mode: warmup=0 and default iters=1000\n");
   printf("  -h              Show this help message\n");
   printf("\nExample:\n");
   printf("  %s -m 128 -n 4096 -k 4096 -g 128 -s 108\n", prog_name);
@@ -873,6 +874,8 @@ int main(int argc, char* argv[]) {
   int num_sms = -1;      // -1 for auto-detect
   int warmup = 10;
   int iters = 100;
+  bool iters_set = false;
+  bool ncu_mode = false;
 
   // Parse command line arguments
   for (int i = 1; i < argc; i++) {
@@ -890,6 +893,9 @@ int main(int argc, char* argv[]) {
       warmup = atoi(argv[++i]);
     } else if (strcmp(argv[i], "-i") == 0 && i + 1 < argc) {
       iters = atoi(argv[++i]);
+      iters_set = true;
+    } else if (strcmp(argv[i], "--ncu") == 0) {
+      ncu_mode = true;
     } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
       print_usage(argv[0]);
       return 0;
@@ -897,6 +903,14 @@ int main(int argc, char* argv[]) {
       printf("Unknown option: %s\n", argv[i]);
       print_usage(argv[0]);
       return 1;
+    }
+  }
+
+  if (ncu_mode) {
+    // No separate warmup loop; use ncu --launch-skip/--launch-count to pick a single iteration.
+    warmup = 0;
+    if (!iters_set) {
+      iters = 1000;
     }
   }
 

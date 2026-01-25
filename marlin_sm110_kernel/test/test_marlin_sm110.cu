@@ -15,12 +15,15 @@ struct Args {
   int group_size = 128;
   int warmup = 10;
   int iters = 100;
+  bool warmup_set = false;
+  bool iters_set = false;
+  bool ncu_mode = false;
   bool list_configs = false;
 };
 
 void print_usage(const char* name) {
   std::printf(
-      "Usage: %s [--m=N] [--n=N] [--k=N] [--group_size=N] [--warmup=N] [--iters=N] [--list_configs]\n",
+      "Usage: %s [--m=N] [--n=N] [--k=N] [--group_size=N] [--warmup=N] [--iters=N] [--list_configs] [--ncu]\n",
       name);
 }
 
@@ -52,9 +55,15 @@ void parse_args(int argc, char** argv, Args& args) {
       continue;
     }
     if (parse_int(argv[i], "--warmup=", args.warmup)) {
+      args.warmup_set = true;
       continue;
     }
     if (parse_int(argv[i], "--iters=", args.iters)) {
+      args.iters_set = true;
+      continue;
+    }
+    if (std::strcmp(argv[i], "--ncu") == 0) {
+      args.ncu_mode = true;
       continue;
     }
     if (std::strcmp(argv[i], "--list_configs") == 0) {
@@ -83,6 +92,14 @@ int main(int argc, char** argv) {
   if (args.list_configs) {
     marlin::print_gptq_fp16_int4_configs();
     return 0;
+  }
+
+  if (args.ncu_mode) {
+    // No separate warmup loop; use ncu --launch-skip/--launch-count to pick a single iteration.
+    args.warmup = 0;
+    if (!args.iters_set) {
+      args.iters = 1000;
+    }
   }
 
   if (args.m <= 0 || args.n <= 0 || args.k <= 0) {

@@ -83,6 +83,21 @@ fpA_intB_standalone/build/test_fpA_intB_gemm \
   --config=16x128x64x3x1
 ```
 
+NCU mode (profile one iteration)
+--------------------------------
+`--ncu` disables the separate warmup loop and sets a larger default `--iters` so you can use Nsight Compute
+to capture a single steady-state launch via `--launch-skip/--launch-count`.
+
+Note: `--ncu` requires `--config=...` to avoid profiling-style config search.
+
+Example:
+
+```
+fpA_intB_standalone/build/test_fpA_intB_gemm \
+  --m=1 --n=2048 --k=2048 --group_size=128 \
+  --ncu --config=cuda --iters=2000
+```
+
 Debug profile logging (config search)
 -------------------------------------
 Set `FPA_INTB_PROFILE_LOG=1` to print each candidate config, its timing, and failure reasons:
