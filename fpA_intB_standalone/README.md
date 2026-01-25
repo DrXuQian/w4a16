@@ -83,6 +83,34 @@ fpA_intB_standalone/build/test_fpA_intB_gemm \
   --config=16x128x64x3x1
 ```
 
+Debug profile logging (config search)
+-------------------------------------
+Set `FPA_INTB_PROFILE_LOG=1` to print each candidate config, its timing, and failure reasons:
+
+```
+FPA_INTB_PROFILE_LOG=1 \
+fpA_intB_standalone/build/test_fpA_intB_gemm \
+  --m=1 --n=4096 --k=4096 --group_size=128
+```
+
+Traverse all configs without search
+-----------------------------------
+Use the helper script to run every candidate configuration directly:
+
+```
+fpA_intB_standalone/scripts/run_all_configs.sh \
+  --bin fpA_intB_standalone/build/test_fpA_intB_gemm \
+  --m 1 --n 4096 --k 4096 --group 128 --warmup 10 --iters 100 --out results.txt
+```
+
+Skip the CUDA fallback:
+
+```
+fpA_intB_standalone/scripts/run_all_configs.sh \
+  --bin fpA_intB_standalone/build/test_fpA_intB_gemm \
+  --m 1 --n 4096 --k 4096 --group 128 --warmup 10 --iters 100 --skip-cuda
+```
+
 CPU reference (small shapes only):
 
 ```

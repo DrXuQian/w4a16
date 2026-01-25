@@ -1,0 +1,4 @@
+/home/qianxu/w4a16/marlin_sm110_kernel/build_sm120/CMakeFiles/marlin_sm110_kernel.dir
+/home/qianxu/w4a16/marlin_sm110_kernel/build_sm120/CMakeFiles/test_marlin_sm110.dir
+/home/qianxu/w4a16/marlin_sm110_kernel/build_sm120/CMakeFiles/edit_cache.dir
+/home/qianxu/w4a16/marlin_sm110_kernel/build_sm120/CMakeFiles/rebuild_cache.dir

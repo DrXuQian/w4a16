@@ -1,0 +1,1 @@
+/usr/bin/g++ CMakeFiles/test_marlin_sm110.dir/test/test_marlin_sm110.cu.o CMakeFiles/test_marlin_sm110.dir/cmake_device_link.o -o test_marlin_sm110  libmarlin_sm110_kernel.a /usr/local/cuda-12.8/lib64/libcudart.so -lcudadevrt -lcudart_static -lrt -lpthread -ldl  -L"/usr/local/cuda-12.8/targets/x86_64-linux/lib/stubs" -L"/usr/local/cuda-12.8/targets/x86_64-linux/lib"

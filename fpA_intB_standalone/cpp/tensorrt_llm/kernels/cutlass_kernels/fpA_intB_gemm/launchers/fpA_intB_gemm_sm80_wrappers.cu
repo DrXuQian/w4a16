@@ -12,6 +12,8 @@
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cstdlib>
+#include <exception>
 #include <limits>
 #include <vector>
 
@@ -68,6 +70,16 @@ bool same_config(CutlassGemmConfig const& a, CutlassGemmConfig const& b)
 {
     return a.enableCudaKernel == b.enableCudaKernel && a.tile_config_sm80 == b.tile_config_sm80
         && a.split_k_style == b.split_k_style && a.split_k_factor == b.split_k_factor && a.stages == b.stages;
+}
+
+bool profile_debug_enabled()
+{
+    const char* env = std::getenv("FPA_INTB_PROFILE_LOG");
+    if (env == nullptr || env[0] == '\0')
+    {
+        return false;
+    }
+    return env[0] != '0';
 }
 
 __global__ void fill_half_kernel(half* data, size_t n, float scale)
@@ -249,11 +261,18 @@ bool fpA_intB_select_config_fp16_int4_gptq(CutlassGemmConfig& out_config, int m,
         return false;
     }
 
+    bool const debug = profile_debug_enabled();
     int const sm = tensorrt_llm::common::getSMVersion();
     auto const& configs = get_candidate_configs_cached(enable_cuda_fallback);
     if (configs.empty())
     {
         return false;
+    }
+    if (debug)
+    {
+        std::fprintf(stderr,
+            "[fpA_intB] profile start: m=%d n=%d k=%d group=%d sm=%d configs=%zu cuda_fallback=%d\n",
+            m, n, k, group_size, sm, configs.size(), enable_cuda_fallback ? 1 : 0);
     }
 
     cudaStream_t stream{};
@@ -264,16 +283,37 @@ bool fpA_intB_select_config_fp16_int4_gptq(CutlassGemmConfig& out_config, int m,
     bool found = false;
     CutlassGemmConfig best{};
 
-    for (auto const& cfg : configs)
+    for (size_t idx = 0; idx < configs.size(); ++idx)
     {
+        auto const& cfg = configs[idx];
         if (cfg.enableCudaKernel && m >= 16)
         {
+            if (debug)
+            {
+                std::fprintf(stderr, "[fpA_intB] skip idx=%zu cuda_kernel (m=%d >= 16)\n", idx, m);
+            }
             continue;
+        }
+        if (debug)
+        {
+            if (cfg.enableCudaKernel)
+            {
+                std::fprintf(stderr, "[fpA_intB] profile idx=%zu cuda_kernel\n", idx);
+            }
+            else
+            {
+                std::fprintf(stderr, "[fpA_intB] profile idx=%zu tile_enum=%d stages=%d split_k=%d\n",
+                    idx, static_cast<int>(cfg.tile_config_sm80), cfg.stages, cfg.split_k_factor);
+            }
         }
         try
         {
             float const time = profile_tactic(m, n, k, group_size, cfg, buf.d_a, buf.d_b, buf.d_scales, buf.d_zeros,
                 buf.d_c, buf.d_workspace, buf.workspace_bytes, stream, sm);
+            if (debug)
+            {
+                std::fprintf(stderr, "[fpA_intB] idx=%zu time=%.4f ms\n", idx, time);
+            }
             if (time < best_time)
             {
                 best_time = time;
@@ -281,9 +321,24 @@ bool fpA_intB_select_config_fp16_int4_gptq(CutlassGemmConfig& out_config, int m,
                 found = true;
             }
         }
+        catch (std::exception const& e)
+        {
+            cudaError_t err = cudaGetLastError();
+            if (debug)
+            {
+                std::fprintf(stderr, "[fpA_intB] idx=%zu exception: %s; cuda: %s (%d)\n", idx, e.what(),
+                    cudaGetErrorString(err), static_cast<int>(err));
+            }
+            continue;
+        }
         catch (...)
         {
-            cudaGetLastError();
+            cudaError_t err = cudaGetLastError();
+            if (debug)
+            {
+                std::fprintf(stderr, "[fpA_intB] idx=%zu exception: <unknown>; cuda: %s (%d)\n", idx,
+                    cudaGetErrorString(err), static_cast<int>(err));
+            }
             continue;
         }
     }
