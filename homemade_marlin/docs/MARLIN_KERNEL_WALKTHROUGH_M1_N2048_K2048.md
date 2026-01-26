@@ -125,6 +125,336 @@ s
 
 ---
 
+## 2.1 这张卡(48 SM)上, 每个 block(你可以近似当成每个 SM)干了哪些 tile?
+
+重要前提:
+
+- 这个 kernel 启动时 `blocks = sms` (host 侧 `marlin_cuda(...)` 里这么写的)
+- 在 RTX 5070 上查询到 `sms=48`
+- 一次 launch 的 `gridDim.x = 48`
+- 总 tiles = `k_tiles * n_tiles = 16 * 16 = 256`
+- `iters = ceildiv(256, 48) = 6`
+
+调度方式(可把每个 block 视为领取一个连续区间):
+
+```
+block b 负责 tile_linear_idx in [6*b, 6*(b+1))
+tile_linear_idx -> (slice_col, slice_row):
+  slice_col = idx / 16
+  slice_row = idx % 16
+```
+
+所以每个 block 的任务如下(只列出有工作的 block0..block42; block43..47 会是 inactive):
+
+```
+block0:  col0 rows0-5
+block1:  col0 rows6-11
+block2:  col0 rows12-15; col1 rows0-1
+block3:  col1 rows2-7
+block4:  col1 rows8-13
+block5:  col1 rows14-15; col2 rows0-3
+block6:  col2 rows4-9
+block7:  col2 rows10-15
+block8:  col3 rows0-5
+block9:  col3 rows6-11
+block10: col3 rows12-15; col4 rows0-1
+block11: col4 rows2-7
+block12: col4 rows8-13
+block13: col4 rows14-15; col5 rows0-3
+block14: col5 rows4-9
+block15: col5 rows10-15
+block16: col6 rows0-5
+block17: col6 rows6-11
+block18: col6 rows12-15; col7 rows0-1
+block19: col7 rows2-7
+block20: col7 rows8-13
+block21: col7 rows14-15; col8 rows0-3
+block22: col8 rows4-9
+block23: col8 rows10-15
+block24: col9 rows0-5
+block25: col9 rows6-11
+block26: col9 rows12-15; col10 rows0-1
+block27: col10 rows2-7
+block28: col10 rows8-13
+block29: col10 rows14-15; col11 rows0-3
+block30: col11 rows4-9
+block31: col11 rows10-15
+block32: col12 rows0-5
+block33: col12 rows6-11
+block34: col12 rows12-15; col13 rows0-1
+block35: col13 rows2-7
+block36: col13 rows8-13
+block37: col13 rows14-15; col14 rows0-3
+block38: col14 rows4-9
+block39: col14 rows10-15
+block40: col15 rows0-5
+block41: col15 rows6-11
+block42: col15 rows12-15
+```
+
+读法:
+
+- `colX` 对应输出 `C` 的列范围: `[128*X, 128*X + 127]`
+- `rowsR0-R1` 对应 `K` 的范围(每个 row 是 128 个 K):
+  - row r -> K range `[128*r, 128*r+127]`
+  - rows r0-r1 -> K range `[128*r0, 128*(r1+1)-1]`
+
+---
+
+## 2.2 对单个 tile(一个 col, 一个 row), 它到底算了多少? 对应哪个输出?
+
+对任意 tile `(slice_col=c, slice_row=r)`:
+
+- 逻辑上算:
+  - `C_tile[16x128] += A_tile[16x128] * B_tile[128x128]` (K=128)
+- 这对应的输出区域(全局, row-major):
+  - 输出行: `m in [0..15]` (但 M=1 时只有 m=0 有效)
+  - 输出列: `n in [128*c .. 128*c+127]`
+- 这个 tile 的 MAC 数:
+  - `16 * 128 * 128 = 262,144` MAC (kernel 仍然会做满, 只是多余行不写回)
+
+---
+
+## 2.3 (重点) 这个 tile 的 A/B/s/C 在 gmem 上的“地址”(用 index/byte offset 表示)
+
+下面全部用 kernel 里实际访问的单位: `int4` (16 bytes) 来描述.
+你可以把它转换成 byte offset: `byte_offset = int4_index * 16`.
+
+### A (FP16 activations), 仅 row0 有效
+
+kernel 里 `A` 是 `const int4*` (把 `half*` cast 成 `int4*`), 因此:
+
+- A 的 row stride (int4) = `a_gl_stride = K/8 = 2048/8 = 256`
+- 一个 K tile(r) 覆盖 128 个 half = 16 个 int4
+
+对于 tile row=r, row0 的 A 数据是:
+
+```
+A int4 indices: [r*16 + 0 ... r*16 + 15]
+byte offsets:   16*(r*16 + t), t=0..15
+half columns:   [128*r + 8*t ... 128*r + 8*t + 7]
+```
+
+并且 M=1 时, 只有 `threadIdx.x in [0..15]` 会真的去 cp.async A:
+
+```
+tid=t (0..15) loads A[r*16 + t] (int4, 16 bytes) into shared
+```
+
+### s (scales, group=128)
+
+scale 矩阵逻辑 shape = `(K/groupsize, N)` = `(16, 2048)` (FP16).
+在 kernel 里同样 cast 成 `int4*`:
+
+- s 的 row stride (int4) = `s_gl_stride = N/8 = 2048/8 = 256`
+- 一个 N tile(c) 覆盖 128 个 half = 16 个 int4
+
+tile (c,r) 对应的 scale 行就是 group 行 r:
+
+```
+s int4 indices: [r*256 + c*16 + 0 ... r*256 + c*16 + 15]
+```
+
+同样只有 `tid in [0..15]` 会写 s 到 shared.
+
+### B (INT4 weights, offline 预排布后的 gmem 布局)
+
+B 的 layout 是 Marlin 的关键, 它不是简单的 row-major int4 pack.
+但你不用先理解 python packing 才能“跟踪地址”, 因为 kernel 的访问模式非常明确.
+
+对 tile (c,r), kernel 每个线程会 load **两次** `int4` (因为 `b_sh_wr_iters=2`):
+
+先定义几个常量(本 case):
+
+```
+b_gl_stride      = 16*N/32 = 1024           (int4)
+b_gl_rd_delta_o  = b_gl_stride * thread_k_blocks = 1024*8 = 8192   (int4)
+b_gl_rd_delta_i  = b_gl_stride * (threads/b_sh_stride) = 1024*4 = 4096 (int4)
+b_sh_stride      = 32*thread_n_blocks/4 = 64
+```
+
+对任意线程 `tid=threadIdx.x`, 令:
+
+```
+k_group = tid / 64         (0..3)   // 4 组, 对应 CTA 内 split-K
+lane    = tid % 64         (0..63)
+```
+
+那么 tile(c,r) 的 B 访问 int4 index 是:
+
+```
+base = 8192*r + 64*c + 1024*k_group + lane
+
+load0: B[ base + 0   ]
+load1: B[ base + 4096]    // 因为 b_gl_rd_delta_i=4096
+```
+
+所以整块 tile 一共读了:
+- 256 threads * 2 loads * 16B = 8192B
+- 对应 128x128 个 int4 weight (8192B 正好)
+
+### C (FP16 output), tile 写回的位置
+
+输出 C 也是 `half*` cast 成 `int4*`.
+
+- C 的 row stride(int4) = `c_gl_stride = N/8 = 256`
+- tile(c) 覆盖 128 列 = 16 个 int4
+
+row0 的最终输出 tile 写回位置:
+
+```
+C int4 indices: [c*16 + 0 ... c*16 + 15]
+byte offsets:   16*(c*16 + j) = 256*c + 16*j
+```
+
+注意: 因为 split-K, 多个 block 会先把 partial sum“累加”到同一个 C tile 上(在 L2 里做 global_reduce),
+最终由该 slice 的最后一个 block 写出最终结果.
+
+---
+
+## 2.4 同一个 tile 在 shared memory 里的位置(精确到 int4 index/byte offset)
+
+kernel 里 shared 是一个动态数组:
+
+```cpp
+extern __shared__ int4 sh[];
+int4* sh_a = sh;
+int4* sh_b = sh_a + (stages * a_sh_stage);
+int4* sh_s = sh_b + (stages * b_sh_stage);
+```
+
+对本 case 的常量:
+
+```
+stages=4
+a_sh_stage=256 int4  (=4096B)
+b_sh_stage=512 int4  (=8192B)
+s_sh_stage=16  int4  (=256B)
+```
+
+所以 shared 的分段布局是(单位: int4):
+
+```
+sh:
+  A0 [0 .. 255]
+  A1 [256 .. 511]
+  A2 [512 .. 767]
+  A3 [768 .. 1023]
+
+  B0 [1024 .. 1535]
+  B1 [1536 .. 2047]
+  B2 [2048 .. 2559]
+  B3 [2560 .. 3071]
+
+  S0 [3072 .. 3087]
+  S1 [3088 .. 3103]
+  S2 [3104 .. 3119]
+  S3 [3120 .. 3135]
+```
+
+换成 byte offset(每个 int4=16B):
+
+```
+A stage p base = 16 * (p*256)    = p*4096 bytes
+B stage p base = 16 * (1024 + p*512) = 16384 + p*8192 bytes
+S stage p base = 16 * (3072 + p*16)  = 49152 + p*256 bytes
+```
+
+### 写入 shared 时的 index(谁写了哪里)
+
+当 `fetch_to_shared(pipe=p, a_off=...)` 被调用:
+
+#### A stage p
+
+代码(写 A)在:
+
+```cpp
+int4* sh_a_stage = sh_a + a_sh_stage * p;
+cp_async4_pred(&sh_a_stage[a_sh_wr_trans[i]], &A[...], a_sh_wr_pred[i]);
+```
+
+对 M=1:
+- `a_sh_wr_iters=1` 所以只有 `i=0`
+- 只有 `tid=0..15` 满足 `a_sh_wr_pred[0]=true`
+- 并且对 row0, XOR swizzle 退化为 identity: `a_sh_wr_trans[0] == a_sh_wr == tid`
+
+因此:
+
+```
+tid=t (0..15): sh_a_stage[t] = A_tile_int4[t]   (16B each)
+```
+
+也就是 A stage p 的 `[0..15]` 这 16 个 int4 保存了这一个 tile 的 A(row0)数据.
+
+#### B stage p
+
+代码(写 B)在:
+
+```cpp
+int4* sh_b_stage = sh_b + b_sh_stage * p;
+cp_async4_stream(&sh_b_stage[256*i + tid], B_ptr[i]);  // i=0..1
+```
+
+所以:
+
+```
+tid=0..255:
+  sh_b_stage[tid]       <- B load #0 (k-subtile 0)
+  sh_b_stage[256 + tid] <- B load #1 (k-subtile 1)
+```
+
+#### S stage p (group=128)
+
+本 case `group_blocks==thread_k_blocks`, 所以每个 tile 都会加载 scales:
+
+```cpp
+int4* sh_s_stage = sh_s + s_sh_stage * p;
+if (tid < 16) sh_s_stage[tid] <- s[...]
+```
+
+所以:
+
+```
+tid=t (0..15): sh_s_stage[t] = s_tile_int4[t]
+```
+
+### 从 shared 读回寄存器时的 index(谁读了哪里)
+
+#### B: 每个 sub-k 对应 shared 的哪一半?
+
+代码:
+
+```cpp
+frag_b_quant[k % 2] =
+  *reinterpret_cast<I4*>(&sh_b_stage[256 * (k % 2) + tid]);
+```
+
+因此:
+
+```
+k=0 -> 读 sh_b_stage[tid]        (对应本 tile 的 K[0..63] 那一半)
+k=1 -> 读 sh_b_stage[256 + tid]  (对应本 tile 的 K[64..127] 那一半)
+```
+
+#### A: `ldmatrix` 的读地址
+
+代码:
+
+```cpp
+ldsm4(frag_a[k%2][0], &sh_a_stage[a_sh_rd_trans[k][0]]);
+```
+
+这里 `a_sh_rd_trans[...]` 是为了保证 shared bank conflict free 的 XOR layout.
+对 M=1 你可以先把它理解为:
+
+```
+ldmatrix 从 sh_a_stage 的那 16 个 int4 里, 按 tensorcore 需要的 fragment layout 取数据
+```
+
+如果你想看到具体数值, 用我加的 `--trace` 先把 `a_sh_rd` / `a_sh_rd_trans` 打出来再对照.
+
+---
+
 ## 3. 为什么需要 global reduction? (Split-K across CTAs)
 
 如果 M 很小(比如 1), 只按 N tile 切分, 你只有 16 个 CTA 可用(每个 CTA 做一个 16x128 输出 tile).
