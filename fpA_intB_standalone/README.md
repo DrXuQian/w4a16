@@ -83,6 +83,37 @@ fpA_intB_standalone/build/test_fpA_intB_gemm \
   --config=16x128x64x3x1
 ```
 
+Interpreting `--list_configs` output (`tile_enum/stages/split_k`)
+-----------------------------------------------------------------
+`--list_configs` prints CUTLASS candidates in the form:
+
+- `tile_enum=<int> stages=<int> split_k=<int>`
+
+Meaning:
+
+- `tile_enum`: the underlying integer value of `cutlass_extensions::CutlassTileConfig`
+  (see `fpA_intB_standalone/cpp/tensorrt_llm/cutlass_extensions/include/cutlass_extensions/gemm_configs.h`).
+  The enum name encodes the CTA tile shape, e.g. `CtaShape128x128x64_...` means `tile_m=128, tile_n=128, tile_k=64`.
+- `stages`: CUTLASS mainloop pipeline stages.
+- `split_k`: serial split-K factor (when `> 1`).
+
+Example: `tile_enum=11 stages=3 split_k=7` corresponds to:
+
+- `tile_enum=11` -> `CtaShape128x128x64_WarpShape128x32x64` -> `tile_m=128 tile_n=128 tile_k=64`
+- so the CLI form is:
+
+```
+fpA_intB_standalone/build/test_fpA_intB_gemm \
+  --m=1 --n=2048 --k=3584 --group_size=128 \
+  --config=128x128x64x3x7
+```
+
+Notes:
+- `split_k` must divide K and keep `K / split_k` a multiple of 64 (weight-only fpA_intB requirement).
+  For example `K=2048` cannot use `split_k=7` (not divisible).
+- The standalone `--config=tile_m,tile_n,tile_k,stages,split_k` interface selects by tile shape; it does not accept
+  `tile_enum` directly.
+
 NCU mode (profile one iteration)
 --------------------------------
 `--ncu` disables the separate warmup loop and sets a larger default `--iters` so you can use Nsight Compute
