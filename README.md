@@ -8,7 +8,6 @@ Included projects
   - CUTLASS path + CUDA fallback for small M (e.g. M=1)
   - TRT-LLM-style config profiling (`--list_configs`, `--config=...`, `FPA_INTB_PROFILE_LOG=1`)
   - Helper script to run all configs directly: `scripts/run_all_configs.sh`
-- `marlin_sm110_kernel/`: vLLM extracted Marlin INT4 GPTQ kernel + selector + standalone CLI
 - `homemade_marlin/`: standalone Marlin kernel variants used for performance comparison
   - `MARLIN_USE_CREATEPOLICY=0` by default to avoid `createpolicy` illegal-instruction issues on some setups
 
