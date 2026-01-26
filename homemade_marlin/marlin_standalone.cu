@@ -23,6 +23,16 @@
 #define MARLIN_USE_CREATEPOLICY 0
 #endif
 
+// Optional device-side tracing via printf (slow; intended for understanding/debug only).
+// Enabled at runtime via the standalone CLI flag `--trace`.
+struct MarlinTraceConfig {
+  int enabled;
+  int block;
+  int thread;
+};
+
+__device__ __managed__ MarlinTraceConfig g_marlin_trace{0, 0, 0};
+
 // ============================================================================
 // Utility Functions
 // ============================================================================
@@ -314,6 +324,20 @@ __global__ void Marlin(
   };
   init_slice();
 
+  if (g_marlin_trace.enabled && blockIdx.x == g_marlin_trace.block && threadIdx.x == g_marlin_trace.thread) {
+    printf("[marlin_trace] block=%d thread=%d\\n", (int) blockIdx.x, (int) threadIdx.x);
+    printf("[marlin_trace] tm=%d tn=%d tk=%d stages=%d group_blocks=%d threads=%d\\n",
+      thread_m_blocks, thread_n_blocks, thread_k_blocks, stages, group_blocks, threads);
+    printf("[marlin_trace] prob_m=%d prob_n=%d prob_k=%d parallel=%d\\n", prob_m, prob_n, prob_k, parallel);
+    printf("[marlin_trace] k_tiles=%d n_tiles=%d iters=%d\\n", k_tiles, n_tiles, iters);
+    if (slice_iters == 0) {
+      printf("[marlin_trace] slice: <inactive>\\n");
+    } else {
+      printf("[marlin_trace] slice_row=%d slice_col_par=%d slice_col=%d slice_iters=%d slice_count=%d slice_idx=%d\\n",
+        slice_row, slice_col_par, slice_col, slice_iters, slice_count, slice_idx);
+    }
+  }
+
   // ========================================================================
   // Memory Access Parameters - A Matrix
   // ========================================================================
@@ -379,6 +403,24 @@ __global__ void Marlin(
   for (int i = 0; i < a_sh_wr_iters; i++)
     a_sh_wr_pred[i] = a_sh_wr_delta * i + a_sh_wr < a_sh_stride * prob_m;
   bool s_sh_wr_pred = threadIdx.x < s_sh_stride;
+
+  if (g_marlin_trace.enabled && blockIdx.x == g_marlin_trace.block && threadIdx.x == g_marlin_trace.thread) {
+    printf("[marlin_trace] a_gl_stride=%d a_sh_stride=%d\\n", a_gl_stride, a_sh_stride);
+    printf("[marlin_trace] a_gl_rd_delta_o=%d a_gl_rd_delta_i=%d a_sh_wr_delta=%d\\n",
+      a_gl_rd_delta_o, a_gl_rd_delta_i, a_sh_wr_delta);
+    printf("[marlin_trace] a_sh_rd_delta_o=%d a_sh_rd_delta_i=%d a_sh_stage=%d a_sh_wr_iters=%d\\n",
+      a_sh_rd_delta_o, a_sh_rd_delta_i, a_sh_stage, a_sh_wr_iters);
+    printf("[marlin_trace] a_gl_rd=%d a_sh_wr=%d a_sh_rd=%d a_sh_wr_pred0=%d\\n",
+      a_gl_rd, a_sh_wr, a_sh_rd, (int) a_sh_wr_pred[0]);
+
+    printf("[marlin_trace] b_gl_stride=%d b_sh_stride=%d\\n", b_gl_stride, b_sh_stride);
+    printf("[marlin_trace] b_gl_rd_delta_o=%d b_gl_rd_delta_i=%d b_sh_stage=%d b_sh_wr_iters=%d\\n",
+      b_gl_rd_delta_o, b_gl_rd_delta_i, b_sh_stage, b_sh_wr_iters);
+    printf("[marlin_trace] b_gl_rd=%d b_sh_wr=%d b_sh_rd=%d\\n", b_gl_rd, b_sh_wr, b_sh_rd);
+
+    printf("[marlin_trace] s_gl_stride=%d s_sh_stride=%d s_gl_rd=%d s_sh_rd=%d s_sh_wr_pred=%d\\n",
+      s_gl_stride, s_sh_stride, s_gl_rd, s_sh_rd, (int) s_sh_wr_pred);
+  }
 
   // XOR-based layout to avoid bank conflicts
   auto transform_a = [&] (int i) {
@@ -860,6 +902,9 @@ void print_usage(const char* prog_name) {
   printf("  -w <warmup>     Warmup iterations (default: 10)\n");
   printf("  -i <iters>      Timed iterations (default: 100)\n");
   printf("  --ncu           Nsight Compute mode: warmup=0 and default iters=1000\n");
+  printf("  --trace         Print a small device-side trace (printf) for one block/thread (implies warmup=0 iters=1)\n");
+  printf("  --trace_block B Select which CTA (blockIdx.x) to trace (default: 0)\n");
+  printf("  --trace_thread T Select which threadIdx.x to trace (default: 0)\n");
   printf("  -h              Show this help message\n");
   printf("\nExample:\n");
   printf("  %s -m 128 -n 4096 -k 4096 -g 128 -s 108\n", prog_name);
@@ -876,6 +921,9 @@ int main(int argc, char* argv[]) {
   int iters = 100;
   bool iters_set = false;
   bool ncu_mode = false;
+  bool trace = false;
+  int trace_block = 0;
+  int trace_thread = 0;
 
   // Parse command line arguments
   for (int i = 1; i < argc; i++) {
@@ -896,6 +944,12 @@ int main(int argc, char* argv[]) {
       iters_set = true;
     } else if (strcmp(argv[i], "--ncu") == 0) {
       ncu_mode = true;
+    } else if (strcmp(argv[i], "--trace") == 0) {
+      trace = true;
+    } else if (strcmp(argv[i], "--trace_block") == 0 && i + 1 < argc) {
+      trace_block = atoi(argv[++i]);
+    } else if (strcmp(argv[i], "--trace_thread") == 0 && i + 1 < argc) {
+      trace_thread = atoi(argv[++i]);
     } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
       print_usage(argv[0]);
       return 0;
@@ -912,6 +966,16 @@ int main(int argc, char* argv[]) {
     if (!iters_set) {
       iters = 1000;
     }
+  }
+  if (trace) {
+    // Device printf is very slow; keep this to a single launch by default.
+    warmup = 0;
+    iters = 1;
+    g_marlin_trace.enabled = 1;
+    g_marlin_trace.block = trace_block;
+    g_marlin_trace.thread = trace_thread;
+  } else {
+    g_marlin_trace.enabled = 0;
   }
 
   // Validate parameters
