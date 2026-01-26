@@ -573,46 +573,53 @@ __global__ void Marlin(
   };  // end matmul
 
   // Threadblock reduction:
-  // Some configs effectively compute the same C fragment multiple times inside one CTA
-  // (a byproduct of how threads are arranged to load B). Reduce those replicas in shared.
-  auto thread_block_reduce = [&] () {
-    constexpr int red_off = threads / b_sh_stride / 2;
-    if (red_off >= 1) {
-      int red_idx = threadIdx.x / b_sh_stride;
-      constexpr int red_sh_stride = b_sh_stride * 4 * 2;
-      constexpr int red_sh_delta = b_sh_stride;
-      int red_sh_rd = red_sh_stride * (threadIdx.x / b_sh_stride) + (threadIdx.x % b_sh_stride);
+  // Some configs produce multiple "replicas" of the same output fragment within one CTA
+  // (due to how B is loaded / partitioned). We reduce those replicas here so that only
+  // the first replica (red_idx==0, i.e. threadIdx.x < b_sh_stride) carries the final sums.
+  //
+  // Conceptually:
+  //   - red_idx = threadIdx.x / b_sh_stride identifies which replica group a thread belongs to.
+  //   - We do a tree-reduction over red_idx, staging partials in shared (as int4 = 16B = 4 floats).
+  auto thread_block_reduce = [&] () {  // CTA-local reduce over red_idx replicas
+    constexpr int red_off = threads / b_sh_stride / 2;  // initial tree offset = (num_replicas / 2)
+    if (red_off >= 1) {  // only needed when we actually have multiple replicas
+      int red_idx = threadIdx.x / b_sh_stride;  // replica id in [0, threads/b_sh_stride)
+      constexpr int red_sh_stride = b_sh_stride * 4 * 2;  // int4s per replica buffer in shared (8 * b_sh_stride)
+      constexpr int red_sh_delta = b_sh_stride;  // int4 stride between j-slices within one replica buffer
+      int red_sh_rd = red_sh_stride * red_idx + (threadIdx.x % b_sh_stride);  // this thread's base int4 slot in shared
 
-      #pragma unroll
-      for (int m_block = 0; m_block < thread_m_blocks; m_block++) {
-        #pragma unroll
-        for (int i = red_off; i > 0; i /= 2) {
-          if (i <= red_idx && red_idx < 2 * i) {
-            #pragma unroll
-            for (int j = 0; j < 4 * 2; j++) {
-              int red_sh_wr = red_sh_delta * j + (red_sh_rd - red_sh_stride * i);
-              if (i < red_off) {
-                float* c_rd = reinterpret_cast<float*>(&sh[red_sh_delta * j + red_sh_rd]);
-                float* c_wr = reinterpret_cast<float*>(&sh[red_sh_wr]);
-                #pragma unroll
-                for (int k = 0; k < 4; k++)
-                  reinterpret_cast<FragC*>(frag_c)[4 * 2 * m_block + j][k] += c_rd[k] + c_wr[k];
+      #pragma unroll  // unroll over m-blocks (each m_block is 16 rows)
+      for (int m_block = 0; m_block < thread_m_blocks; m_block++) {  // reduce per m_block independently
+        #pragma unroll  // unroll tree steps
+        for (int i = red_off; i > 0; i /= 2) {  // i = reduction distance between source/dest replica groups
+          if (i <= red_idx && red_idx < 2 * i) {  // upper-half replica groups write/reduce into lower-half
+            #pragma unroll  // unroll over (n_subtile * b_half) = 4 * 2 = 8 fragments
+            for (int j = 0; j < 4 * 2; j++) {  // j enumerates the 8 FragC fragments per m_block
+              int red_sh_wr = red_sh_delta * j + (red_sh_rd - red_sh_stride * i);  // dest shared slot (red_idx -> red_idx-i)
+              if (i < red_off) {  // not the first step: shared already contains partials to accumulate
+                float* c_rd = reinterpret_cast<float*>(&sh[red_sh_delta * j + red_sh_rd]);  // src partial (this red_idx)
+                float* c_wr = reinterpret_cast<float*>(&sh[red_sh_wr]);  // dst partial (red_idx-i) from previous step
+                #pragma unroll  // unroll 4-lane FragC accumulation
+                for (int k = 0; k < 4; k++) {  // k enumerates the 4 float lanes inside one FragC
+                  reinterpret_cast<FragC*>(frag_c)[4 * 2 * m_block + j][k] += c_rd[k] + c_wr[k];  // local += src + dst
+                }
               }
-              sh[red_sh_wr] = reinterpret_cast<int4*>(&frag_c)[4 * 2 * m_block + j];
+              sh[red_sh_wr] = reinterpret_cast<int4*>(&frag_c)[4 * 2 * m_block + j];  // write updated partial to shared
             }
           }
-          __syncthreads();
+          __syncthreads();  // make partials visible before the next tree step
         }
-        if (red_idx == 0) {
-          #pragma unroll
-          for (int i = 0; i < 4 * 2; i++) {
-            float* c_rd = reinterpret_cast<float*>(&sh[red_sh_delta * i + red_sh_rd]);
-            #pragma unroll
-            for (int j = 0; j < 4; j++)
-              reinterpret_cast<FragC*>(frag_c)[4 * 2 * m_block + i][j] += c_rd[j];
+        if (red_idx == 0) {  // replica-0 threads finalize by adding the last partial stored in shared
+          #pragma unroll  // unroll over 8 fragments
+          for (int i = 0; i < 4 * 2; i++) {  // i enumerates the 8 FragC fragments per m_block
+            float* c_rd = reinterpret_cast<float*>(&sh[red_sh_delta * i + red_sh_rd]);  // reduced partial from other replicas
+            #pragma unroll  // unroll 4-lane FragC accumulation
+            for (int j = 0; j < 4; j++) {  // j enumerates the 4 float lanes inside one FragC
+              reinterpret_cast<FragC*>(frag_c)[4 * 2 * m_block + i][j] += c_rd[j];  // add reduced partial into replica-0
+            }
           }
         }
-        __syncthreads();
+        __syncthreads();  // keep shared reuse safe across m_block
       }
     }
   };
@@ -620,55 +627,62 @@ __global__ void Marlin(
   // Global reduction across CTAs (when slice_count > 1):
   // - first=true:  first CTA for this (slice_col) => skip load, just write partial
   // - last=true:   last  CTA for this (slice_col) => accumulate but don't write partial
-  auto global_reduce = [&] (bool first = false, bool last = false) {
-    constexpr int active_threads = 32 * thread_n_blocks / 4;
-    if (threadIdx.x < active_threads) {
-      // C is treated as int4 where one int4 packs 8 fp16 values along N.
-      // The indexing below maps each active thread to one int4 lane of the output tile.
-      int c_gl_stride = prob_n / 8;
-      int c_gl_wr_delta_o = 8 * c_gl_stride;
-      int c_gl_wr_delta_i = 4 * (active_threads / 32);
-      int c_gl_wr = c_gl_stride * ((threadIdx.x % 32) / 4) + 4 * (threadIdx.x / 32) + threadIdx.x % 4;
-      c_gl_wr += (2 * thread_n_blocks) * slice_col;
-      constexpr int c_sh_wr_delta = active_threads;
-      int c_sh_wr = threadIdx.x;
+  auto global_reduce = [&] (bool first = false, bool last = false) {  // CTA-to-CTA reduction via global C
+    constexpr int active_threads = 32 * thread_n_blocks / 4;  // participating threads (cover N tile as int4 lanes)
+    if (threadIdx.x < active_threads) {  // only "writer" threads touch global C (others are inactive here)
+      // C is treated as int4 where one int4 packs 8 fp16 values along N (int4 = 16B = 8 * fp16).
+      // Thread mapping (tid < active_threads):
+      //   warp = tid / 32, lane = tid % 32
+      //   row8 = lane / 4   (0..7 rows within an 8-row chunk)
+      //   col4 = lane % 4   (0..3 int4 columns within a warp)
+      //   col8 = 4*warp+col4 (0..7 int4 columns across 2 warps = 64 fp16 columns)
+      //
+      // The loop over i below expands this base mapping to cover:
+      //   - multiple 8-row chunks (via i/2)
+      //   - left/right halves of the N tile (via i%2)
+      int c_gl_stride = prob_n / 8;  // global C row stride in int4 (N/8)
+      int c_gl_wr_delta_o = 8 * c_gl_stride;  // jump 8 rows in global C (int4 indexing)
+      int c_gl_wr_delta_i = 4 * (active_threads / 32);  // jump to the next 64-column half-tile (in int4)
+      int c_gl_wr = c_gl_stride * ((threadIdx.x % 32) / 4) + 4 * (threadIdx.x / 32) + threadIdx.x % 4;  // base (row8,col8)
+      c_gl_wr += (2 * thread_n_blocks) * slice_col;  // N-tile offset (tile width = 2*thread_n_blocks int4)
+      constexpr int c_sh_wr_delta = active_threads;  // shared staging stride: [i][tid] in int4
+      int c_sh_wr = threadIdx.x;  // shared staging column = tid
 
-      int row = (threadIdx.x % 32) / 4;
+      int row = (threadIdx.x % 32) / 4;  // row within the current 8-row chunk (for prob_m bounds)
 
-      if (!first) {
-        #pragma unroll
-        for (int i = 0; i < thread_m_blocks * 4; i++) {
-          cp_async4_pred(
-            &sh[c_sh_wr + c_sh_wr_delta * i],
-            &C[c_gl_wr + c_gl_wr_delta_o * (i / 2) + c_gl_wr_delta_i * (i % 2)],
-            i < (thread_m_blocks - 1) * 4 || 8 * (i / 2) + row < prob_m
+      if (!first) {  // not the first CTA: load previous partials from global C
+        #pragma unroll  // unroll staging over i
+        for (int i = 0; i < thread_m_blocks * 4; i++) {  // i spans (16*thread_m_blocks) rows as 4 chunks per m_block
+          cp_async4_pred(  // stage one int4 (8 fp16) partial into shared
+            &sh[c_sh_wr + c_sh_wr_delta * i],  // smem dst: sh[i][tid]
+            &C[c_gl_wr + c_gl_wr_delta_o * (i / 2) + c_gl_wr_delta_i * (i % 2)],  // gmem src: (row chunk, N half)
+            i < (thread_m_blocks - 1) * 4 || 8 * (i / 2) + row < prob_m  // pred: tail rows in last m_block
           );
         }
-        cp_async_fence();
-        cp_async_wait<0>();
+        cp_async_fence();  // commit cp.async group
+        cp_async_wait<0>();  // wait until all staged partials are visible in shared
       }
 
-      #pragma unroll
-      for (int i = 0; i < thread_m_blocks * 4; i++) {
-        if (i < (thread_m_blocks - 1) * 4 || 8 * (i / 2) + row < prob_m) {
-          if (!first) {
-            int4 c_red = sh[c_sh_wr + i * c_sh_wr_delta];
-            #pragma unroll
-            for (int j = 0; j < 2 * 4; j++) {
-              reinterpret_cast<float*>(&frag_c)[4 * 2 * 4 * (i / 4) + 4 * j + (i % 4)] += __half2float(
-                reinterpret_cast<__half*>(&c_red)[j]
-              );
+      #pragma unroll  // unroll accumulation / partial writeback over i
+      for (int i = 0; i < thread_m_blocks * 4; i++) {  // i selects (8-row chunk, N half) within the CTA tile
+        if (i < (thread_m_blocks - 1) * 4 || 8 * (i / 2) + row < prob_m) {  // bounds for the last m_block
+          if (!first) {  // accumulate previously-written partial into the local f32 accumulators
+            int4 c_red = sh[c_sh_wr + i * c_sh_wr_delta];  // loaded partial: 8 fp16 values packed in int4
+            #pragma unroll  // unroll unpack + accumulate of 8 fp16 values
+            for (int j = 0; j < 2 * 4; j++) {  // j in [0..7] over the 8 half values inside int4
+              reinterpret_cast<float*>(&frag_c)[4 * 2 * 4 * (i / 4) + 4 * j + (i % 4)] +=  // select matching lane
+                __half2float(reinterpret_cast<__half*>(&c_red)[j]);  // fp16 -> f32 and accumulate
             }
           }
-          if (!last) {
-            int4 c;
-            #pragma unroll
-            for (int j = 0; j < 2 * 4; j++) {
-              reinterpret_cast<__half*>(&c)[j] = __float2half(
-                reinterpret_cast<float*>(&frag_c)[4 * 2 * 4 * (i / 4) + 4 * j + (i % 4)]
+          if (!last) {  // not the last CTA: write partial back for the next CTA to consume
+            int4 c;  // pack 8 fp16 values back into int4
+            #pragma unroll  // unroll pack of 8 halves
+            for (int j = 0; j < 2 * 4; j++) {  // j in [0..7]
+              reinterpret_cast<__half*>(&c)[j] = __float2half(  // f32 -> fp16
+                reinterpret_cast<float*>(&frag_c)[4 * 2 * 4 * (i / 4) + 4 * j + (i % 4)]  // same lane mapping as above
               );
             }
-            C[c_gl_wr + c_gl_wr_delta_o * (i / 2) + c_gl_wr_delta_i * (i % 2)] = c;
+            C[c_gl_wr + c_gl_wr_delta_o * (i / 2) + c_gl_wr_delta_i * (i % 2)] = c;  // global partial store (int4)
           }
         }
       }
@@ -677,52 +691,52 @@ __global__ void Marlin(
 
   // Write final result for this CTA's (M,N) tile.
   // Pack fp16 results into shared (as half2) and stream out as int4 (16B) stores.
-  auto write_result = [&] () {
+  auto write_result = [&] () {  // final writeback of this CTA's tile to global C
     // Shared-memory writeback staging:
-    // - write threads pack fp16 into shared (as half2) with padding to avoid bank conflicts
-    // - then all threads stream shared -> global as int4
-    int c_gl_stride = prob_n / 8;
-    constexpr int c_sh_stride = 2 * thread_n_blocks + 1;
-    int c_gl_wr_delta = c_gl_stride * (threads / (2 * thread_n_blocks));
-    constexpr int c_sh_rd_delta = c_sh_stride * (threads / (2 * thread_n_blocks));
+    // - First, a subset of threads packs f32 accumulators into shared as half2 (fp16), with padding to avoid bank conflicts.
+    // - Then, all threads stream shared -> global as int4 (each int4 = 8 fp16 values = 16 bytes).
+    int c_gl_stride = prob_n / 8;  // global C row stride in int4 (N/8)
+    constexpr int c_sh_stride = 2 * thread_n_blocks + 1;  // shared row stride in int4 (tile width + 1 padding)
+    int c_gl_wr_delta = c_gl_stride * (threads / (2 * thread_n_blocks));  // per-iteration global int4 stride for this thread
+    constexpr int c_sh_rd_delta = c_sh_stride * (threads / (2 * thread_n_blocks));  // per-iteration shared int4 stride for this thread
 
-    int c_gl_wr = c_gl_stride * (threadIdx.x / (2 * thread_n_blocks)) + (threadIdx.x % (2 * thread_n_blocks));
-    c_gl_wr += (2 * thread_n_blocks) * slice_col;
-    int c_sh_wr = (4 * c_sh_stride) * ((threadIdx.x % 32) / 4) + (threadIdx.x % 32) % 4;
-    c_sh_wr += 32 * (threadIdx.x / 32);
-    int c_sh_rd = c_sh_stride * (threadIdx.x / (2 * thread_n_blocks)) + (threadIdx.x % (2 * thread_n_blocks));
+    int c_gl_wr = c_gl_stride * (threadIdx.x / (2 * thread_n_blocks)) + (threadIdx.x % (2 * thread_n_blocks));  // base global int4 (row,col)
+    c_gl_wr += (2 * thread_n_blocks) * slice_col;  // offset to this N tile (tile width = 2*thread_n_blocks int4)
+    int c_sh_wr = (4 * c_sh_stride) * ((threadIdx.x % 32) / 4) + (threadIdx.x % 32) % 4;  // base shared half2 index (warp-friendly layout)
+    c_sh_wr += 32 * (threadIdx.x / 32);  // separate warps in half2 indexing (each warp writes its own columns)
+    int c_sh_rd = c_sh_stride * (threadIdx.x / (2 * thread_n_blocks)) + (threadIdx.x % (2 * thread_n_blocks));  // base shared int4 index (contiguous stream order)
 
-    int c_gl_wr_end = c_gl_stride * prob_m;
+    int c_gl_wr_end = c_gl_stride * prob_m;  // end of valid global C region (in int4) for prob_m rows
 
-    auto write = [&] (int idx, float c0, float c1, FragS& s) {
-      half2 res = __halves2half2(__float2half(c0), __float2half(c1));
-      if (group_blocks == -1)
-        res = __hmul2(res, s[0]);
-      ((half2*) sh)[idx] = res;
+    auto write = [&] (int idx, float c0, float c1, FragS& s) {  // pack 2 f32 -> half2, optionally scale, store to shared
+      half2 res = __halves2half2(__float2half(c0), __float2half(c1));  // f32 -> fp16 pair (2 columns)
+      if (group_blocks == -1)  // per-column mode: apply scale at the end (grouped mode already scaled during matmul)
+        res = __hmul2(res, s[0]);  // scale both halves
+      ((half2*) sh)[idx] = res;  // shared write as half2 (4 bytes)
     };
 
-    if (threadIdx.x / 32 < thread_n_blocks / 4) {
-      #pragma unroll
-      for (int i = 0; i < thread_m_blocks; i++) {
-        #pragma unroll
-        for (int j = 0; j < 4; j++) {
-          int wr = c_sh_wr + 8 * j;
-          write(wr + (4 * c_sh_stride) * 0 + 0, frag_c[i][j][0][0], frag_c[i][j][0][1], frag_s[j / 2][2 * (j % 2) + 0]);
-          write(wr + (4 * c_sh_stride) * 8 + 0, frag_c[i][j][0][2], frag_c[i][j][0][3], frag_s[j / 2][2 * (j % 2) + 0]);
-          write(wr + (4 * c_sh_stride) * 0 + 4, frag_c[i][j][1][0], frag_c[i][j][1][1], frag_s[j / 2][2 * (j % 2) + 1]);
-          write(wr + (4 * c_sh_stride) * 8 + 4, frag_c[i][j][1][2], frag_c[i][j][1][3], frag_s[j / 2][2 * (j % 2) + 1]);
+    if (threadIdx.x / 32 < thread_n_blocks / 4) {  // only the warps that own columns pack frag_c -> shared
+      #pragma unroll  // unroll m_block packing
+      for (int i = 0; i < thread_m_blocks; i++) {  // i selects the m_block (16 rows each)
+        #pragma unroll  // unroll 16-col chunks per warp (4 * 16 = 64 cols per warp)
+        for (int j = 0; j < 4; j++) {  // j selects a 16-column chunk within this warp's half-tile
+          int wr = c_sh_wr + 8 * j;  // half2 index: 8 half2 = 16 columns per chunk
+          write(wr + (4 * c_sh_stride) * 0 + 0, frag_c[i][j][0][0], frag_c[i][j][0][1], frag_s[j / 2][2 * (j % 2) + 0]);  // rows 0..7,  cols 0..7
+          write(wr + (4 * c_sh_stride) * 8 + 0, frag_c[i][j][0][2], frag_c[i][j][0][3], frag_s[j / 2][2 * (j % 2) + 0]);  // rows 8..15, cols 0..7
+          write(wr + (4 * c_sh_stride) * 0 + 4, frag_c[i][j][1][0], frag_c[i][j][1][1], frag_s[j / 2][2 * (j % 2) + 1]);  // rows 0..7,  cols 8..15
+          write(wr + (4 * c_sh_stride) * 8 + 4, frag_c[i][j][1][2], frag_c[i][j][1][3], frag_s[j / 2][2 * (j % 2) + 1]);  // rows 8..15, cols 8..15
         }
-        c_sh_wr += 16 * (4 * c_sh_stride);
+        c_sh_wr += 16 * (4 * c_sh_stride);  // advance shared half2 base by 16 rows for the next m_block
       }
     }
-    __syncthreads();
+    __syncthreads();  // ensure shared packing is complete before streaming out
 
-    #pragma unroll
-    for (int i = 0; i < ceildiv(16 * thread_m_blocks, threads / (2 * thread_n_blocks)); i++) {
-      if (c_gl_wr < c_gl_wr_end) {
-        C[c_gl_wr] = sh[c_sh_rd];
-        c_gl_wr += c_gl_wr_delta;
-        c_sh_rd += c_sh_rd_delta;
+    #pragma unroll  // unroll per-thread streaming loop
+    for (int i = 0; i < ceildiv(16 * thread_m_blocks, threads / (2 * thread_n_blocks)); i++) {  // cover all rows in the CTA tile
+      if (c_gl_wr < c_gl_wr_end) {  // guard the prob_m tail
+        C[c_gl_wr] = sh[c_sh_rd];  // global store of one int4 (8 fp16) from shared
+        c_gl_wr += c_gl_wr_delta;  // advance global int4 index for the next iteration
+        c_sh_rd += c_sh_rd_delta;  // advance shared int4 index for the next iteration
       }
     }
   };
@@ -731,94 +745,94 @@ __global__ void Marlin(
   // Pipeline Initialization and Main Loop
   // ========================================================================
 
-  // Start pipeline:
-  // Prefetch (stages-1) tiles so the main loop can overlap:
-  //   ldmatrix/dequant/mma on stage p  with  cp.async filling stage (p+stages-1).
-  auto start_pipes = [&] () {
-    #pragma unroll
-    for (int i = 0; i < stages - 1; i++)
-      fetch_to_shared(i, i, i < slice_iters);
-    zero_accums();
-    wait_for_stage();
-    fetch_to_registers(0, 0);
-    a_gl_rd += a_gl_rd_delta_o * (stages - 1);  // A gmem read index (int4)
-  };
-  start_pipes();
+	  // Start pipeline:
+	  // Prefetch (stages-1) tiles so the main loop can overlap:
+	  //   ldmatrix/dequant/mma on stage p  with  cp.async filling stage (p+stages-1).
+	  auto start_pipes = [&] () {  // prologue: fill pipeline and prime registers for k=0
+	    #pragma unroll  // unroll stage prefetches
+	    for (int i = 0; i < stages - 1; i++)  // prefetch (stages-1) K-tiles into shared
+	      fetch_to_shared(i, i, i < slice_iters);  // stage=i, a_off=i, pred guards tail tiles
+	    zero_accums();  // clear frag_c accumulators before accumulation
+	    wait_for_stage();  // wait until stage 0 data is ready in shared
+	    fetch_to_registers(0, 0);  // load A/B(/S) for k=0 from stage 0 into regs
+	    a_gl_rd += a_gl_rd_delta_o * (stages - 1);  // A gmem read index (int4)
+	  };
+	  start_pipes();  // kick off the pipeline for this slice
 
-  // Main loop
-  while (slice_iters) {
-    #pragma unroll
-    for (int pipe = 0; pipe < stages;) {
-      #pragma unroll
-      for (int k = 0; k < b_sh_wr_iters; k++) {
-        fetch_to_registers(k + 1, pipe % stages);
-        if (k == b_sh_wr_iters - 2) {
-          fetch_to_shared((pipe + stages - 1) % stages, pipe, slice_iters >= stages);
-          pipe++;
-          wait_for_stage();
-        }
-        matmul(k);
-      }
-      slice_iters--;
-      if (slice_iters == 0)
-        break;
-    }
-    a_gl_rd += a_gl_rd_delta_o * stages;  // A gmem read index (int4)
+	  // Main loop
+	  while (slice_iters) {  // iterate over K-tiles assigned to this CTA for the current N tile
+	    #pragma unroll  // unroll over stages (small fixed count)
+	    for (int pipe = 0; pipe < stages;) {  // pipe is the logical K-tile index within this unrolled chunk
+	      #pragma unroll  // unroll B-subtiles inside one stage
+	      for (int k = 0; k < b_sh_wr_iters; k++) {  // k iterates over B sub-tiles within a stage
+	        fetch_to_registers(k + 1, pipe % stages);  // prefetch next k-subtile into regs (ping-pong buffers)
+	        if (k == b_sh_wr_iters - 2) {  // when we're about to use the last subtile, rotate the shared stage
+	          fetch_to_shared((pipe + stages - 1) % stages, pipe, slice_iters >= stages);  // cp.async next K-tile into the "oldest" stage
+	          pipe++;  // advance logical pipe (stage consumer)
+	          wait_for_stage();  // wait until the newly-fetched stage is ready for ldmatrix/loads
+	        }
+	        matmul(k);  // dequant/scale (if needed) + tensorcore MMA for subtile k
+	      }
+	      slice_iters--;  // one K-tile fully consumed
+	      if (slice_iters == 0)  // slice complete
+	        break;  // exit stage loop early
+	    }
+	    a_gl_rd += a_gl_rd_delta_o * stages;  // A gmem read index (int4)
 
-    if (slice_iters == 0) {
-      cp_async_wait<0>();
-      bool last = slice_idx == slice_count - 1;
+	    if (slice_iters == 0) {  // finished all K-tiles for this N tile => reduce + writeback
+	      cp_async_wait<0>();  // ensure no pending cp.async reads are outstanding
+	      bool last = slice_idx == slice_count - 1;  // last CTA for this N tile (does final writeback)
 
-      if (group_blocks == -1 && last) {
-        if (s_sh_wr_pred)
-          cp_async4_stream(&sh_s[s_sh_wr], &s[s_gl_rd]);
-        cp_async_fence();
-      }
+	      if (group_blocks == -1 && last) {  // per-column mode: fetch scales once at the end (applied in write_result)
+	        if (s_sh_wr_pred)  // only threads within the scale tile issue the load
+	          cp_async4_stream(&sh_s[s_sh_wr], &s[s_gl_rd]);  // stage per-column scales into sh_s
+	        cp_async_fence();  // commit scale cp.async
+	      }
 
-      thread_block_reduce();
+	      thread_block_reduce();  // CTA-local reduce (collapse red_idx replicas into red_idx==0)
 
-      if (group_blocks == -1 && last) {
-        cp_async_wait<0>();
-        __syncthreads();
-        if (threadIdx.x / 32 < thread_n_blocks / 4) {
-          reinterpret_cast<int4*>(&frag_s)[0] = sh_s[s_sh_rd + 0];  // scale fragments (regs)
-          reinterpret_cast<int4*>(&frag_s)[1] = sh_s[s_sh_rd + 4];  // scale fragments (regs)
-        }
-      }
+	      if (group_blocks == -1 && last) {  // per-column mode: bring scales into regs for write_result()
+	        cp_async_wait<0>();  // wait for scale cp.async
+	        __syncthreads();  // make sh_s visible to all threads
+	        if (threadIdx.x / 32 < thread_n_blocks / 4) {  // only active writer warps need scales
+	          reinterpret_cast<int4*>(&frag_s)[0] = sh_s[s_sh_rd + 0];  // load scales for cols 0..?
+	          reinterpret_cast<int4*>(&frag_s)[1] = sh_s[s_sh_rd + 4];  // load scales for cols +8..?
+	        }
+	      }
 
-      if (slice_count > 1) {
-        barrier_acquire(&locks[slice_col], slice_idx);
-        global_reduce(slice_idx == 0, last);
-        barrier_release(&locks[slice_col], last);
-      }
+	      if (slice_count > 1) {  // multiple CTAs contribute to the same N tile => global reduction needed
+	        barrier_acquire(&locks[slice_col], slice_idx);  // wait until it's this CTA's turn to reduce
+	        global_reduce(slice_idx == 0, last);  // first writes partial, middle reduces+writes, last reduces only
+	        barrier_release(&locks[slice_col], last);  // signal next CTA (or reset on last)
+	      }
 
-      if (last)
-        write_result();
+	      if (last)  // only last CTA writes the final, fully reduced output tile
+	        write_result();  // pack to shared and store to global C
 
-      slice_row = 0;  // tile row in K grid (idx%k_tiles)
-      slice_col_par++;
-      slice_col++;
-      init_slice();
+	      slice_row = 0;  // tile row in K grid (idx%k_tiles)
+	      slice_col_par++;  // advance to the next N-tile (including parallel slices)
+	      slice_col++;  // advance N-tile within this parallel slice
+	      init_slice();  // compute next slice_iters/slice_count/slice_idx
 
-      if (slice_iters) {
-        a_gl_rd = a_gl_stride * (threadIdx.x / a_gl_rd_delta_o) + (threadIdx.x % a_gl_rd_delta_o);  // A gmem read index (int4)
+	      if (slice_iters) {  // if there is another slice to process, rewind pointers and restart pipeline
+	        a_gl_rd = a_gl_stride * (threadIdx.x / a_gl_rd_delta_o) + (threadIdx.x % a_gl_rd_delta_o);  // A gmem read index (int4)
 
-        // Move B pointers to the next N tile and rewind K back to slice_row=0 for the new slice.
-        #pragma unroll
-        for (int i = 0; i < b_sh_wr_iters; i++)
-          B_ptr[i] += b_sh_stride - b_gl_rd_delta_o * k_tiles;
-        if (slice_col == 0) {
-          #pragma unroll
-          for (int i = 0; i < b_sh_wr_iters; i++)
-            B_ptr[i] -= b_gl_stride;
-        }
+	        // Move B pointers to the next N tile and rewind K back to slice_row=0 for the new slice.
+	        #pragma unroll
+	        for (int i = 0; i < b_sh_wr_iters; i++)  // adjust each per-iter B pointer
+	          B_ptr[i] += b_sh_stride - b_gl_rd_delta_o * k_tiles;  // move to next N tile and rewind K by k_tiles
+	        if (slice_col == 0) {  // wrapped around to the next parallel slice
+	          #pragma unroll
+	          for (int i = 0; i < b_sh_wr_iters; i++)  // adjust each per-iter B pointer
+	            B_ptr[i] -= b_gl_stride;  // move B back by one row stride to align slice_col wrap
+	        }
 
-        // Reset scale pointer for the new N tile (grouped mode will advance it inside fetch_to_shared()).
-        s_gl_rd = s_sh_stride * slice_col + threadIdx.x;  // scale gmem read index (int4)
-        start_pipes();
-      }
-    }
-  }
+	        // Reset scale pointer for the new N tile (grouped mode will advance it inside fetch_to_shared()).
+	        s_gl_rd = s_sh_stride * slice_col + threadIdx.x;  // scale gmem read index (int4)
+	        start_pipes();  // restart prologue for the next slice
+	      }
+	    }
+	  }
 }
 
 // ============================================================================
