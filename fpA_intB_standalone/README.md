@@ -143,7 +143,8 @@ SM110/SM120 behavior
 --------------------
 This standalone extraction only implements the SM80 CUTLASS fpA_intB kernel path (plus the CUDA fallback).
 On SM110/SM120 GPUs, the runner intentionally dispatches to the SM80 implementation (i.e. no SM90/SM100/SM120
-specialized CUTLASS kernels are included here).
+specialized CUTLASS kernels are included here). The CUTLASS fpA_intB kernel is also patched to allow SM110 to run the
+SM80 fallback (so SM110 behaves the same as SM120 for this project).
 
 If you are building on a non-SM80 GPU, override the build arch, e.g.:
 

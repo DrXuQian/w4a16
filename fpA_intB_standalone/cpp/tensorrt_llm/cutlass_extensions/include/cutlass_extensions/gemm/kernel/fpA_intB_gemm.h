@@ -533,6 +533,9 @@ struct GemmFpAIntB
         run_kernel<arch::Sm80>(params, shared_storage);
 #elif (__CUDA_ARCH__ == 890)
         run_kernel<arch::Sm89>(params, shared_storage);
+#elif (__CUDA_ARCH__ >= 1100) && (__CUDA_ARCH__ < 1200)
+        // Standalone extraction: use the SM80 implementation as a fallback for SM110 (Thor).
+        run_kernel<arch::Sm80>(params, shared_storage);
 #elif (__CUDA_ARCH__ >= 1200)
         // Use SM80 implementation for GB20x.
         run_kernel<arch::Sm80>(params, shared_storage);
