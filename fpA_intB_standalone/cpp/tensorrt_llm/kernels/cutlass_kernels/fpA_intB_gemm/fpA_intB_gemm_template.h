@@ -40,7 +40,7 @@
 #include "tensorrt_llm/kernels/cutlass_kernels/cutlass_heuristic.h"
 #include "tensorrt_llm/kernels/cutlass_kernels/cutlass_type_conversion.h"
 #include "tensorrt_llm/kernels/cutlass_kernels/fpA_intB_gemm/fpA_intB_gemm.h"
-// Standalone build targets SM80 only. SM90/SM100 dispatch headers are omitted.
+#include "tensorrt_llm/kernels/cutlass_kernels/fpA_intB_gemm/fpA_intB_gemm_template_sm90.h"
 
 namespace tk = tensorrt_llm::common;
 namespace tkc = tensorrt_llm::cutlass_extensions;
@@ -423,7 +423,7 @@ void CutlassFpAIntBGemmRunner<ActivationType, WeightType, QuantOp, ScaleZeroType
     char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream, int* occupancy)
 {
     TLLM_LOG_DEBUG(__PRETTY_FUNCTION__);
-    // Treat SM110/SM120 as SM80 fallback (standalone path).
+    // SM80 kernels (Ampere path). Keep SM110/SM120 as SM80 fallback in the standalone build.
     if ((sm_ >= 80 && sm_ < 90) || sm_ == 110 || sm_ >= 120)
     {
         dispatch_gemm_to_cutlass<ActivationType, WeightType, ScaleZeroType, BiasType, OutputType, cutlass::arch::Sm80,
@@ -431,9 +431,22 @@ void CutlassFpAIntBGemmRunner<ActivationType, WeightType, QuantOp, ScaleZeroType
             workspace_ptr, workspace_bytes, gemm_config, stream, occupancy);
         return;
     }
+
+    if (sm_ == 90)
+    {
+#ifdef COMPILE_HOPPER_TMA_GEMMS
+        cutlass_kernels_oss::sm90_dispatch_gemm_to_cutlass<ActivationType, WeightType, ScaleZeroType, BiasType,
+            OutputType, QuantOp, EpilogueTag>(A, B, weight_scales, weight_zero_points, biases, alpha, C, m, n, k,
+            group_size, workspace_ptr, workspace_bytes, gemm_config, stream, occupancy);
+        return;
+#else  // COMPILE_HOPPER_TMA_GEMMS
+        throw std::runtime_error(
+            "[TensorRT LLM Error][fpA_intB Runner] Rebuild with Hopper support (define COMPILE_HOPPER_TMA_GEMMS and "
+            "compile for SM90, e.g. -DCMAKE_CUDA_ARCHITECTURES=90-real).");
+#endif // COMPILE_HOPPER_TMA_GEMMS
+    }
     throw std::runtime_error(
-        "[TensorRT LLM Error][CutlassFpAIntBGemmRunner][dispatch_to_arch] Standalone build supports SM80 (and SM110/"
-        "SM120 via SM80 fallback) only.");
+        "[TensorRT LLM Error][CutlassFpAIntBGemmRunner][dispatch_to_arch] Arch unsupported for this standalone build.");
 }
 
 template <typename ActivationType, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp, typename ScaleZeroType,

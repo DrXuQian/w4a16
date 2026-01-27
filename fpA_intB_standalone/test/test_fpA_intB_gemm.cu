@@ -1,5 +1,5 @@
 /*
- * Standalone test for SM80 fpA_intB GEMM (FP16 x INT4, GPTQ).
+ * Standalone test for fpA_intB GEMM (FP16 x INT4, GPTQ).
  */
 
 #include "tensorrt_llm/common/cudaUtils.h"
@@ -430,7 +430,7 @@ int main(int argc, char** argv)
     std::vector<int8_t> h_preprocessed(h_packed.size(), 0);
     std::vector<size_t> shape = {static_cast<size_t>(args.k), static_cast<size_t>(args.n)};
     tensorrt_llm::kernels::cutlass_kernels::preprocess_weights_for_mixed_gemm(
-        h_preprocessed.data(), h_packed.data(), shape, tensorrt_llm::kernels::cutlass_kernels::QuantType::W4_A16, true);
+        h_preprocessed.data(), h_packed.data(), shape, tensorrt_llm::kernels::cutlass_kernels::QuantType::W4_A16, false);
 
     half* d_a = nullptr;
     int8_t* d_b = nullptr;

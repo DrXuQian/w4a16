@@ -1,13 +1,14 @@
-Standalone SM80 fpA_intB GEMM (FP16 x INT4, GPTQ)
-===================================================
+Standalone fpA_intB GEMM (FP16 x INT4, GPTQ) for SM80 + SM90
+============================================================
 
 This directory contains a minimal, standalone build of TensorRT-LLM's fpA_intB
-(weight-only) GEMM for SM80 (Ampere). It supports:
+(weight-only) GEMM. It supports:
 
 - FP16 activations
 - INT4 weights (GPTQ-style, scale + zero)
 - CUTLASS fpA_intB path
 - CUDA kernel fallback for small M (best performance for M=1)
+- SM80 (Ampere) and SM90 (Hopper) CUTLASS paths (build-arch dependent)
 
 What I extracted
 ----------------
@@ -19,7 +20,7 @@ What I extracted
 
 What is NOT included (limitations)
 ----------------------------------
-- SM90/SM100 paths (SM80 only)
+- SM100/SM110/SM120 specialized CUTLASS paths
 - BF16/FP8/FP4 or INT8 weights
 - bias/alpha/act-scale fusion (GPTQ scale+zero only)
 - non-groupwise quantization (group_size must be 64 or 128)
@@ -39,7 +40,8 @@ Input/weight layout assumptions
 -------------------------------
 - A: FP16 row-major, shape [M, K].
 - B: INT4 packed (2 values per byte), then preprocessed with
-  `preprocess_weights_for_mixed_gemm(..., QuantType::W4_A16, force_interleave=true)`.
+  `preprocess_weights_for_mixed_gemm(..., QuantType::W4_A16, force_interleave=false)`.
+  (If you need to force the SM80 interleaved layout on Hopper, pass `force_interleave=true`.)
 - Scales and zeros: FP16 row-major, shape [K / group_size, N].
 - GPTQ zeros are passed as `zero_x_scale = (-qzeros + 7) * scale` (same as TRT-LLM).
 
@@ -48,8 +50,19 @@ Build
 From the repo root:
 
 ```
-cmake -S fpA_intB_standalone -B fpA_intB_standalone/build
-cmake --build fpA_intB_standalone/build -j8
+cmake -S fpA_intB_standalone -B fpA_intB_standalone/build_sm80 \
+  -DCMAKE_CUDA_ARCHITECTURES=80 \
+  -DCUTLASS_DIR=$HOME/TensorRT-LLM/3rdparty/cutlass
+cmake --build fpA_intB_standalone/build_sm80 -j8
+```
+
+Build for Hopper (SM90):
+
+```
+cmake -S fpA_intB_standalone -B fpA_intB_standalone/build_sm90 \
+  -DCMAKE_CUDA_ARCHITECTURES=90-real \
+  -DCUTLASS_DIR=$HOME/TensorRT-LLM/3rdparty/cutlass
+cmake --build fpA_intB_standalone/build_sm90 -j8
 ```
 
 Run
@@ -57,20 +70,20 @@ Run
 Example:
 
 ```
-fpA_intB_standalone/build/test_fpA_intB_gemm \
+fpA_intB_standalone/build_sm80/test_fpA_intB_gemm \
   --m=1 --n=4096 --k=4096 --group_size=128
 ```
 
 List configs:
 
 ```
-fpA_intB_standalone/build/test_fpA_intB_gemm --list_configs
+fpA_intB_standalone/build_sm80/test_fpA_intB_gemm --list_configs
 ```
 
 Force CUDA kernel:
 
 ```
-fpA_intB_standalone/build/test_fpA_intB_gemm \
+fpA_intB_standalone/build_sm80/test_fpA_intB_gemm \
   --m=1 --n=4096 --k=4096 --group_size=128 \
   --config=cuda
 ```
@@ -78,7 +91,7 @@ fpA_intB_standalone/build/test_fpA_intB_gemm \
 Force a CUTLASS config (tile_m,tile_n,tile_k,stages,split_k):
 
 ```
-fpA_intB_standalone/build/test_fpA_intB_gemm \
+fpA_intB_standalone/build_sm80/test_fpA_intB_gemm \
   --m=1 --n=4096 --k=4096 --group_size=128 \
   --config=16x128x64x3x1
 ```
@@ -103,7 +116,7 @@ Example: `tile_enum=11 stages=3 split_k=7` corresponds to:
 - so the CLI form is:
 
 ```
-fpA_intB_standalone/build/test_fpA_intB_gemm \
+fpA_intB_standalone/build_sm80/test_fpA_intB_gemm \
   --m=1 --n=2048 --k=3584 --group_size=128 \
   --config=128x128x64x3x7
 ```
@@ -124,7 +137,7 @@ Note: `--ncu` requires `--config=...` to avoid profiling-style config search.
 Example:
 
 ```
-fpA_intB_standalone/build/test_fpA_intB_gemm \
+fpA_intB_standalone/build_sm80/test_fpA_intB_gemm \
   --m=1 --n=2048 --k=2048 --group_size=128 \
   --ncu --config=cuda --iters=2000
 ```
@@ -135,7 +148,7 @@ Set `FPA_INTB_PROFILE_LOG=1` to print each candidate config, its timing, and fai
 
 ```
 FPA_INTB_PROFILE_LOG=1 \
-fpA_intB_standalone/build/test_fpA_intB_gemm \
+fpA_intB_standalone/build_sm80/test_fpA_intB_gemm \
   --m=1 --n=4096 --k=4096 --group_size=128
 ```
 
@@ -145,7 +158,7 @@ Use the helper script to run every candidate configuration directly:
 
 ```
 fpA_intB_standalone/scripts/run_all_configs.sh \
-  --bin fpA_intB_standalone/build/test_fpA_intB_gemm \
+  --bin fpA_intB_standalone/build_sm80/test_fpA_intB_gemm \
   --m 1 --n 4096 --k 4096 --group 128 --warmup 10 --iters 100 --out results.txt
 ```
 
@@ -153,14 +166,14 @@ Skip the CUDA fallback:
 
 ```
 fpA_intB_standalone/scripts/run_all_configs.sh \
-  --bin fpA_intB_standalone/build/test_fpA_intB_gemm \
+  --bin fpA_intB_standalone/build_sm80/test_fpA_intB_gemm \
   --m 1 --n 4096 --k 4096 --group 128 --warmup 10 --iters 100 --skip-cuda
 ```
 
 CPU reference (small shapes only):
 
 ```
-fpA_intB_standalone/build/test_fpA_intB_gemm \
+fpA_intB_standalone/build_sm80/test_fpA_intB_gemm \
   --m=1 --n=128 --k=128 --group_size=128 --verify
 ```
 
@@ -172,14 +185,6 @@ Notes
 
 SM110/SM120 behavior
 --------------------
-This standalone extraction only implements the SM80 CUTLASS fpA_intB kernel path (plus the CUDA fallback).
-On SM110/SM120 GPUs, the runner intentionally dispatches to the SM80 implementation (i.e. no SM90/SM100/SM120
-specialized CUTLASS kernels are included here). The CUTLASS fpA_intB kernel is also patched to allow SM110 to run the
-SM80 fallback (so SM110 behaves the same as SM120 for this project).
-
-If you are building on a non-SM80 GPU, override the build arch, e.g.:
-
-```
-cmake -S fpA_intB_standalone -B fpA_intB_standalone/build -DCMAKE_CUDA_ARCHITECTURES=110
-cmake --build fpA_intB_standalone/build -j8
-```
+This standalone extraction includes SM80 and SM90 CUTLASS fpA_intB kernel paths (plus the CUDA fallback).
+On SM110/SM120 GPUs, the runner intentionally dispatches to the SM80 implementation (i.e. no SM100/SM110/SM120
+specialized CUTLASS kernels are included here).

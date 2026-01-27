@@ -1,5 +1,5 @@
 /*
- * Standalone wrappers for SM80 fpA_intB GEMM (FP16 x INT4, GPTQ).
+ * Standalone wrappers for fpA_intB GEMM (FP16 x INT4, GPTQ).
  */
 
 #include "tensorrt_llm/kernels/cutlass_kernels/fpA_intB_gemm/launchers/fpA_intB_gemm_sm80_wrappers.h"
@@ -68,8 +68,33 @@ std::vector<CutlassGemmConfig> const& get_candidate_configs_cached(bool enable_c
 
 bool same_config(CutlassGemmConfig const& a, CutlassGemmConfig const& b)
 {
-    return a.enableCudaKernel == b.enableCudaKernel && a.tile_config_sm80 == b.tile_config_sm80
-        && a.split_k_style == b.split_k_style && a.split_k_factor == b.split_k_factor && a.stages == b.stages;
+    if (a.enableCudaKernel != b.enableCudaKernel)
+    {
+        return false;
+    }
+    if (a.sm_version != b.sm_version || a.is_tma_warp_specialized != b.is_tma_warp_specialized)
+    {
+        return false;
+    }
+    // CUDA fallback is treated as a single config for a given SM family.
+    if (a.enableCudaKernel)
+    {
+        return true;
+    }
+
+    if (a.is_tma_warp_specialized)
+    {
+        // SM90+ (TMA warp-specialized) configs.
+        return a.tile_config_sm90 == b.tile_config_sm90 && a.tile_config_sm100 == b.tile_config_sm100
+            && a.tile_config_sm120 == b.tile_config_sm120 && a.mainloop_schedule == b.mainloop_schedule
+            && a.epilogue_schedule == b.epilogue_schedule && a.cluster_shape == b.cluster_shape
+            && a.dynamic_cluster_shape == b.dynamic_cluster_shape && a.fallback_cluster_shape == b.fallback_cluster_shape
+            && a.swap_ab == b.swap_ab && a.epilogue_fusion_type == b.epilogue_fusion_type;
+    }
+
+    // SM80-compatible configs.
+    return a.tile_config_sm80 == b.tile_config_sm80 && a.split_k_style == b.split_k_style
+        && a.split_k_factor == b.split_k_factor && a.stages == b.stages;
 }
 
 bool profile_debug_enabled()

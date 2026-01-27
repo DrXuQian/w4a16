@@ -26,6 +26,20 @@ set(FPA_INTB_SOURCES
 
 add_library(fpA_intB_gemm STATIC ${FPA_INTB_SOURCES})
 
+set(FPA_INTB_COMPILE_DEFS
+    ENABLE_BF16=0
+    ENABLE_FP8=0
+    ENABLE_FP4=0
+)
+
+# Enable Hopper fpA_intB kernels when building for SM90.
+foreach(arch IN LISTS CMAKE_CUDA_ARCHITECTURES)
+    if(arch MATCHES "^90")
+        list(APPEND FPA_INTB_COMPILE_DEFS COMPILE_HOPPER_TMA_GEMMS=1)
+        break()
+    endif()
+endforeach()
+
 target_include_directories(fpA_intB_gemm PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include
     ${CMAKE_CURRENT_SOURCE_DIR}/cpp
@@ -34,12 +48,7 @@ target_include_directories(fpA_intB_gemm PUBLIC
     ${CUTLASS_DIR}/include
 )
 
-target_compile_definitions(fpA_intB_gemm PUBLIC
-    ENABLE_BF16=0
-    ENABLE_FP8=0
-    ENABLE_FP4=0
-    TLLM_FORCE_SM80=1
-)
+target_compile_definitions(fpA_intB_gemm PUBLIC ${FPA_INTB_COMPILE_DEFS})
 
 target_compile_options(fpA_intB_gemm PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
@@ -57,10 +66,7 @@ target_link_libraries(test_fpA_intB_gemm
 )
 
 target_compile_definitions(test_fpA_intB_gemm PRIVATE
-    ENABLE_BF16=0
-    ENABLE_FP8=0
-    ENABLE_FP4=0
-    TLLM_FORCE_SM80=1
+    ${FPA_INTB_COMPILE_DEFS}
 )
 
 target_compile_options(test_fpA_intB_gemm PRIVATE

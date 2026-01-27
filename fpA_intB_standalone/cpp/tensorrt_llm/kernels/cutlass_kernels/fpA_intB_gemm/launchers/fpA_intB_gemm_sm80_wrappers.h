@@ -1,5 +1,5 @@
 /*
- * Standalone wrappers for SM80 fpA_intB GEMM (FP16 x INT4, GPTQ).
+ * Standalone wrappers for fpA_intB GEMM (FP16 x INT4, GPTQ).
  */
 #pragma once
 
