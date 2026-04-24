@@ -148,36 +148,107 @@ bool parse_config_spec(char const* spec, Args& args)
     return true;
 }
 
-// Tactic file: each line is "m,n,k,gs,config_idx"
-// config_idx is the index into fpA_intB_get_all_configs() list.
-bool load_tactic(std::string const& path, int m, int n, int k, int gs, int& config_idx)
+// Tactic file: portable serialization of CutlassGemmConfig by semantic fields.
+// Format per line:
+//   m,n,k,gs|cuda=1                                            (CUDA core kernel)
+//   m,n,k,gs|cuda=0,tma=0,tile80=5,stages=4,splitk=1,sk_style=0  (SM80 CUTLASS)
+//   m,n,k,gs|cuda=0,tma=1,sm=90,tile90=64016128,ml=1,el=2,cl=1001001  (SM90 TMA)
+//
+// All enum values are stored as integers. The tile/cluster enums encode MxNxK
+// via shape_tuple_to_enum (m*1e6 + n*1e3 + k), so they are self-describing
+// and portable across builds.
+
+std::string serialize_config(tensorrt_llm::cutlass_extensions::CutlassGemmConfig const& c)
+{
+    std::ostringstream s;
+    if (c.enableCudaKernel)
+    {
+        s << "cuda=1";
+    }
+    else if (c.is_tma_warp_specialized)
+    {
+        s << "cuda=0,tma=1,sm=" << c.sm_version
+          << ",tile90=" << static_cast<int>(c.tile_config_sm90)
+          << ",ml=" << static_cast<int>(c.mainloop_schedule)
+          << ",el=" << static_cast<int>(c.epilogue_schedule)
+          << ",cl=" << static_cast<int>(c.cluster_shape);
+    }
+    else
+    {
+        s << "cuda=0,tma=0"
+          << ",tile80=" << static_cast<int>(c.tile_config_sm80)
+          << ",stages=" << c.stages
+          << ",splitk=" << c.split_k_factor
+          << ",sk_style=" << static_cast<int>(c.split_k_style);
+    }
+    return s.str();
+}
+
+bool deserialize_config(std::string const& str, tensorrt_llm::cutlass_extensions::CutlassGemmConfig& out)
+{
+    using namespace tensorrt_llm::cutlass_extensions;
+    out = CutlassGemmConfig{};
+
+    // Parse key=value pairs
+    auto get_int = [&](char const* key) -> int {
+        std::string needle = std::string(key) + "=";
+        auto pos = str.find(needle);
+        if (pos == std::string::npos) return -999;
+        return std::atoi(str.c_str() + pos + needle.size());
+    };
+
+    int cuda = get_int("cuda");
+    if (cuda == 1)
+    {
+        out.enableCudaKernel = true;
+        return true;
+    }
+
+    int tma = get_int("tma");
+    if (tma == 1)
+    {
+        out.is_tma_warp_specialized = true;
+        out.sm_version = get_int("sm");
+        out.tile_config_sm90 = static_cast<CutlassTileConfigSM90>(get_int("tile90"));
+        out.mainloop_schedule = static_cast<MainloopScheduleType>(get_int("ml"));
+        out.epilogue_schedule = static_cast<EpilogueScheduleType>(get_int("el"));
+        out.cluster_shape = static_cast<ClusterShape>(get_int("cl"));
+        return true;
+    }
+
+    // SM80
+    out.tile_config_sm80 = static_cast<CutlassTileConfig>(get_int("tile80"));
+    out.stages = get_int("stages");
+    out.split_k_factor = get_int("splitk");
+    out.split_k_style = static_cast<SplitKStyle>(get_int("sk_style"));
+    out.sm_version = 80;
+    return true;
+}
+
+bool load_tactic(std::string const& path, int m, int n, int k, int gs,
+    tensorrt_llm::cutlass_extensions::CutlassGemmConfig& config)
 {
     std::ifstream f(path);
-    if (!f.is_open())
-    {
-        return false;
-    }
+    if (!f.is_open()) return false;
+
+    char key_prefix[128];
+    std::snprintf(key_prefix, sizeof(key_prefix), "%d,%d,%d,%d|", m, n, k, gs);
+    std::string prefix(key_prefix);
+
     std::string line;
     while (std::getline(f, line))
     {
-        if (line.empty() || line[0] == '#')
+        if (line.empty() || line[0] == '#') continue;
+        if (line.compare(0, prefix.size(), prefix) == 0)
         {
-            continue;
-        }
-        int fm, fn, fk, fgs, fidx;
-        if (std::sscanf(line.c_str(), "%d,%d,%d,%d,%d", &fm, &fn, &fk, &fgs, &fidx) == 5)
-        {
-            if (fm == m && fn == n && fk == k && fgs == gs)
-            {
-                config_idx = fidx;
-                return true;
-            }
+            return deserialize_config(line.substr(prefix.size()), config);
         }
     }
     return false;
 }
 
-void save_tactic(std::string const& path, int m, int n, int k, int gs, int config_idx)
+void save_tactic(std::string const& path, int m, int n, int k, int gs,
+    tensorrt_llm::cutlass_extensions::CutlassGemmConfig const& config)
 {
     std::ofstream f(path, std::ios::app);
     if (!f.is_open())
@@ -185,52 +256,7 @@ void save_tactic(std::string const& path, int m, int n, int k, int gs, int confi
         std::fprintf(stderr, "Warning: cannot write tactic file %s\n", path.c_str());
         return;
     }
-    f << m << "," << n << "," << k << "," << gs << "," << config_idx << "\n";
-}
-
-int find_config_index(tensorrt_llm::cutlass_extensions::CutlassGemmConfig const& config)
-{
-    using Config = tensorrt_llm::cutlass_extensions::CutlassGemmConfig;
-    Config const* configs = nullptr;
-    size_t const count = tensorrt_llm::kernels::cutlass_kernels_oss::fpA_intB_get_all_configs(&configs);
-    for (size_t i = 0; i < count; ++i)
-    {
-        auto const& c = configs[i];
-        if (config.enableCudaKernel != c.enableCudaKernel)
-        {
-            continue;
-        }
-        if (config.enableCudaKernel)
-        {
-            return static_cast<int>(i); // all cuda configs are equivalent
-        }
-        if (config.is_tma_warp_specialized != c.is_tma_warp_specialized)
-        {
-            continue;
-        }
-        if (config.is_tma_warp_specialized)
-        {
-            // SM90+ TMA configs: match by SM90 tile + schedules + cluster
-            if (config.tile_config_sm90 == c.tile_config_sm90
-                && config.mainloop_schedule == c.mainloop_schedule
-                && config.epilogue_schedule == c.epilogue_schedule
-                && config.cluster_shape == c.cluster_shape)
-            {
-                return static_cast<int>(i);
-            }
-        }
-        else
-        {
-            // SM80 configs: match by tile + stages + split_k
-            if (config.tile_config_sm80 == c.tile_config_sm80
-                && config.stages == c.stages
-                && config.split_k_factor == c.split_k_factor)
-            {
-                return static_cast<int>(i);
-            }
-        }
-    }
-    return -1;
+    f << m << "," << n << "," << k << "," << gs << "|" << serialize_config(config) << "\n";
 }
 
 void parse_args(int argc, char** argv, Args& args)
@@ -588,22 +614,10 @@ int main(int argc, char** argv)
     else if (!args.tactic_file.empty())
     {
         // Try loading from tactic file first
-        int cached_idx = -1;
-        if (load_tactic(args.tactic_file, args.m, args.n, args.k, args.group_size, cached_idx))
+        if (load_tactic(args.tactic_file, args.m, args.n, args.k, args.group_size, config))
         {
-            tensorrt_llm::cutlass_extensions::CutlassGemmConfig const* configs = nullptr;
-            size_t const count = tensorrt_llm::kernels::cutlass_kernels_oss::fpA_intB_get_all_configs(&configs);
-            if (cached_idx >= 0 && cached_idx < static_cast<int>(count))
-            {
-                config = configs[cached_idx];
-                tactic_hit = true;
-                std::printf("tactic cache HIT: idx=%d from %s\n", cached_idx, args.tactic_file.c_str());
-            }
-            else
-            {
-                std::fprintf(stderr, "tactic cache: invalid index %d (max %zu), will re-profile\n",
-                    cached_idx, count);
-            }
+            tactic_hit = true;
+            std::printf("tactic cache HIT from %s\n", args.tactic_file.c_str());
         }
         if (!tactic_hit)
         {
@@ -616,12 +630,8 @@ int main(int argc, char** argv)
                 std::fprintf(stderr, "No valid config found for the given shape.\n");
                 return 1;
             }
-            int idx = find_config_index(config);
-            if (idx >= 0)
-            {
-                save_tactic(args.tactic_file, args.m, args.n, args.k, args.group_size, idx);
-                std::printf("tactic saved: idx=%d to %s\n", idx, args.tactic_file.c_str());
-            }
+            save_tactic(args.tactic_file, args.m, args.n, args.k, args.group_size, config);
+            std::printf("tactic saved to %s\n", args.tactic_file.c_str());
         }
     }
     else
