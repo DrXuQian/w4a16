@@ -9,12 +9,16 @@ set(CMAKE_CUDA_STANDARD 17)
 # This bypasses CMAKE_CUDA_ARCHITECTURES which doesn't support the 'a' suffix
 # in CMake < 3.28.
 set(GPU_ARCH "sm_80" CACHE STRING "CUDA architecture (e.g. sm_80, sm_90a)")
-set(CMAKE_CUDA_ARCHITECTURES OFF)  # disable CMake's built-in arch handling
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -arch=${GPU_ARCH}")
-message(STATUS "GPU_ARCH=${GPU_ARCH} (via -arch=${GPU_ARCH})")
+set(CMAKE_CUDA_ARCHITECTURES OFF CACHE STRING "Disable CMake CUDA arch flags for raw -arch builds" FORCE)
+if(CMAKE_CUDA_FLAGS MATCHES "(^| )-arch=sm_[0-9]+a?($| )")
+    message(STATUS "Using existing raw CUDA arch flag from CMAKE_CUDA_FLAGS")
+else()
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -arch=${GPU_ARCH}")
+endif()
+message(STATUS "GPU_ARCH=${GPU_ARCH}; CUDA flags=${CMAKE_CUDA_FLAGS}")
 
 # Auto-detect SM90 for COMPILE_HOPPER_TMA_GEMMS
-if(GPU_ARCH MATCHES "^sm_90")
+if(GPU_ARCH MATCHES "^sm_90" OR CMAKE_CUDA_FLAGS MATCHES "(^| )-arch=sm_90a?($| )")
     set(ENABLE_SM90 TRUE)
 else()
     set(ENABLE_SM90 FALSE)
@@ -36,6 +40,7 @@ set(FPA_INTB_SOURCES
 )
 
 add_library(fpA_intB_gemm STATIC ${FPA_INTB_SOURCES})
+set_property(TARGET fpA_intB_gemm PROPERTY CUDA_ARCHITECTURES OFF)
 set_property(TARGET fpA_intB_gemm PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET fpA_intB_gemm PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
 
@@ -69,6 +74,7 @@ target_link_libraries(fpA_intB_gemm
 )
 
 add_executable(test_fpA_intB_gemm test/test_fpA_intB_gemm.cu)
+set_property(TARGET test_fpA_intB_gemm PROPERTY CUDA_ARCHITECTURES OFF)
 set_property(TARGET test_fpA_intB_gemm PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
 
 target_link_libraries(test_fpA_intB_gemm
@@ -86,6 +92,7 @@ target_compile_options(test_fpA_intB_gemm PRIVATE
 
 # SM90 GEMM init diagnostic (links fpA_intB_gemm, fast to compile)
 add_executable(test_sm90_gemm_init test/test_sm90_gemm_init.cu)
+set_property(TARGET test_sm90_gemm_init PROPERTY CUDA_ARCHITECTURES OFF)
 set_property(TARGET test_sm90_gemm_init PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
 target_link_libraries(test_sm90_gemm_init fpA_intB_gemm CUDA::cudart)
 target_compile_definitions(test_sm90_gemm_init PRIVATE ${FPA_INTB_COMPILE_DEFS})

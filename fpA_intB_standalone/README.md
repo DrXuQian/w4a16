@@ -60,10 +60,26 @@ Build for Hopper (SM90):
 
 ```
 cmake -S fpA_intB_standalone -B fpA_intB_standalone/build_sm90 \
-  -DCMAKE_CUDA_ARCHITECTURES=90-real \
+  -DCMAKE_CUDA_ARCHITECTURES=90a-real \
   -DCUTLASS_DIR=$HOME/TensorRT-LLM/3rdparty/cutlass
 cmake --build fpA_intB_standalone/build_sm90 -j8
 ```
+
+For CMake versions that do not understand the `90a` suffix, use the raw nvcc
+override. The CMakeLists disables CMake's own architecture flag emission for
+this standalone target, so do not also pass `CMAKE_CUDA_FLAGS=-arch=...`.
+
+```
+cmake -S fpA_intB_standalone -B fpA_intB_standalone/build_sm90a \
+  -DGPU_ARCH=sm_90a \
+  -DCUTLASS_DIR=$HOME/TensorRT-LLM/3rdparty/cutlass
+cmake --build fpA_intB_standalone/build_sm90a -j8
+```
+
+Use a clean build directory when switching between `sm_90` and `sm_90a`.
+Hopper TMA/WGMMA kernels must be compiled as `sm_90a`; compiling both `sm_90`
+and `sm_90a` in the same workaround build can make debugging device-image
+selection ambiguous.
 
 Run
 ---
