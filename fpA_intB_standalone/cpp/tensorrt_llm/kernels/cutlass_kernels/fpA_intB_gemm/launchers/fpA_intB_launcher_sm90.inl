@@ -265,6 +265,18 @@ void sm90_generic_mixed_gemm_kernelLauncher(ActivationType const* A, WeightType 
             throw std::runtime_error("[TensorRT LLM Error][fpA_intB Runner] " + err_msg);
         }
 
+        // Debug: print workspace and shared memory info before initialize
+        {
+            size_t needed_ws = gemm.get_workspace_size(args);
+            int device = 0;
+            cudaGetDevice(&device);
+            int max_smem = 0;
+            cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+            std::fprintf(stderr, "[fpA_intB SM90] workspace: needed=%zu provided=%zu\n",
+                needed_ws, workspace_bytes);
+            std::fprintf(stderr, "[fpA_intB SM90] device max_shared_mem_per_block=%d bytes\n", max_smem);
+        }
+
         auto init_status = gemm.initialize(args, workspace, stream);
         if (init_status != cutlass::Status::kSuccess)
         {
@@ -273,6 +285,18 @@ void sm90_generic_mixed_gemm_kernelLauncher(ActivationType const* A, WeightType 
             std::fprintf(stderr, "[fpA_intB SM90] initialize FAILED: %s\n", err_msg.c_str());
             std::fprintf(stderr, "[fpA_intB SM90] Check: compiled with sm_90a? Device is sm_%d\n",
                 tensorrt_llm::common::getSMVersion());
+            std::fprintf(stderr, "[fpA_intB SM90] Possible causes:\n");
+            std::fprintf(stderr, "  - Binary compiled without sm_90a (need -DCMAKE_CUDA_ARCHITECTURES=90a)\n");
+            std::fprintf(stderr, "  - Insufficient shared memory for this tile config\n");
+            std::fprintf(stderr, "  - CUTLASS version mismatch\n");
+
+            // Try to get more info from CUDA
+            cudaError_t cuda_err = cudaGetLastError();
+            if (cuda_err != cudaSuccess)
+            {
+                std::fprintf(stderr, "  - CUDA error: %s (%d)\n",
+                    cudaGetErrorString(cuda_err), static_cast<int>(cuda_err));
+            }
             throw std::runtime_error("[TensorRT LLM Error][fpA_intB Runner] " + err_msg);
         }
 
