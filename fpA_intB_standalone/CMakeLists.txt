@@ -4,27 +4,20 @@ project(fpA_intB_standalone CUDA CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
 
-# SM80 only by default (allow override for PTX JIT).
-if (NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES 80)
-endif()
+# GPU architecture selection.
+# Use -DGPU_ARCH=sm_90a (or sm_80, sm_89, etc.) to set the target arch.
+# This bypasses CMAKE_CUDA_ARCHITECTURES which doesn't support the 'a' suffix
+# in CMake < 3.28.
+set(GPU_ARCH "sm_80" CACHE STRING "CUDA architecture (e.g. sm_80, sm_90a)")
+set(CMAKE_CUDA_ARCHITECTURES OFF)  # disable CMake's built-in arch handling
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -arch=${GPU_ARCH}")
+message(STATUS "GPU_ARCH=${GPU_ARCH} (via -arch=${GPU_ARCH})")
 
-# CMake < 3.28 doesn't support the 'a' suffix in CMAKE_CUDA_ARCHITECTURES.
-# Detect "90a" and force -arch=sm_90a via raw nvcc flags instead.
-set(FORCE_SM90A FALSE)
-foreach(arch IN LISTS CMAKE_CUDA_ARCHITECTURES)
-    if(arch MATCHES "^90a")
-        set(FORCE_SM90A TRUE)
-        # Replace 90a with 90 so CMake doesn't choke, we add -arch=sm_90a manually
-        list(REMOVE_ITEM CMAKE_CUDA_ARCHITECTURES "${arch}")
-        list(APPEND CMAKE_CUDA_ARCHITECTURES 90)
-        break()
-    endif()
-endforeach()
-if(FORCE_SM90A)
-    set(CMAKE_CUDA_ARCHITECTURES 90)
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -gencode arch=compute_90a,code=sm_90a")
-    message(STATUS "Forcing sm_90a via raw nvcc flags (CMake < 3.28 workaround)")
+# Auto-detect SM90 for COMPILE_HOPPER_TMA_GEMMS
+if(GPU_ARCH MATCHES "^sm_90")
+    set(ENABLE_SM90 TRUE)
+else()
+    set(ENABLE_SM90 FALSE)
 endif()
 
 find_package(CUDAToolkit REQUIRED)
@@ -51,12 +44,9 @@ set(FPA_INTB_COMPILE_DEFS
 )
 
 # Enable Hopper fpA_intB kernels when building for SM90.
-foreach(arch IN LISTS CMAKE_CUDA_ARCHITECTURES)
-    if(arch MATCHES "^90")
-        list(APPEND FPA_INTB_COMPILE_DEFS COMPILE_HOPPER_TMA_GEMMS=1)
-        break()
-    endif()
-endforeach()
+if(ENABLE_SM90)
+    list(APPEND FPA_INTB_COMPILE_DEFS COMPILE_HOPPER_TMA_GEMMS=1)
+endif()
 
 target_include_directories(fpA_intB_gemm PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include
