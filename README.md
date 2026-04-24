@@ -47,23 +47,36 @@ FPA_INTB_PROFILE_LOG=1 ./test_fpA_intB_gemm --m=3823 --n=4096 --k=4096 --group_s
 # Correctness verification (small shapes only)
 ./test_fpA_intB_gemm --m=2 --n=128 --k=128 --group_size=128 --verify
 
-# Nsight Compute profiling (requires --config to avoid profiling loop)
-ncu --set full ./test_fpA_intB_gemm --m=1 --n=4096 --k=4096 --group_size=128 --config=cuda --ncu
+# Single inference, no profiling, no warmup (GPU only runs the GEMM kernel)
+./test_fpA_intB_gemm --m=1 --n=12288 --k=3072 --group_size=128 \
+    --tactic=tactics.cache --warmup=0 --iters=1
+
+# Nsight Compute profiling (tactic cache avoids profiling kernel launches)
+ncu --set full ./test_fpA_intB_gemm --m=1 --n=12288 --k=3072 --group_size=128 \
+    --tactic=tactics.cache --warmup=0 --iters=1
 ```
 
-### Tactic cache file format
+### Tactic cache
 
-The `--tactic=<file>` option saves/loads kernel configs as a simple CSV:
+The `--tactic=<file>` option saves/loads kernel configs to skip online profiling:
+
+- **First run** with a new (m,n,k,gs): profiles all candidate configs (~5s), saves best to file
+- **Subsequent runs** with same shape: loads config directly, zero overhead
+- Pre-profiled cache for H800 PCIe included: `tactics_h800.cache`
+
+File format (portable across builds, human-readable):
 
 ```
-# m,n,k,group_size,config_index
-1,12288,3072,128,21
-3823,12288,3072,128,18
+3823,12288,3072,128|cuda=0,tma=1,sm=90,tile90=128256128,ml=0,el=0,cl=2001001
+1,12288,3072,128|cuda=1
 ```
 
-- `config_index` is the index into the candidate config list (from `--list_configs`)
-- The file is append-only: new shapes are added automatically
-- Delete the file to force re-profiling (e.g. after recompiling with different arch)
+Fields: `m,n,k,gs|` followed by config key-value pairs:
+- `cuda=1`: CUDA core GEMV path (M < 16)
+- `tma=1,sm=90,tile90=...,ml=...,el=...,cl=...`: SM90 TMA WGMMA path
+- `tma=0,tile80=...,stages=...,splitk=...`: SM80 CUTLASS path
+
+Delete the cache file to force re-profiling (e.g. when switching GPU arch).
 
 ## Notes
 

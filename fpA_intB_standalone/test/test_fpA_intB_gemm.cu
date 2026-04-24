@@ -474,11 +474,11 @@ int main(int argc, char** argv)
         {
             args.iters = 1000;
         }
-        if (!args.force_config)
+        if (!args.force_config && args.tactic_file.empty())
         {
             std::fprintf(stderr,
-                "Error: --ncu requires --config=... to avoid profiling-style config search.\n"
-                "       First run without --ncu to pick a config, then rerun with --ncu --config=...\n");
+                "Error: --ncu requires --config=... or --tactic=<file> to avoid profiling.\n"
+                "       First run without --ncu to pick a config, then rerun with --ncu --tactic=<file>\n");
             return 1;
         }
     }
