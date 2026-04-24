@@ -395,6 +395,34 @@ void fpA_intB_gemm_fp16_int4_gptq_with_config(half const* A, int8_t const* B, ha
     TLLM_CHECK_WITH_INFO(C != nullptr, "C must not be null");
 
     int const sm = tensorrt_llm::common::getSMVersion();
+    bool const debug = profile_debug_enabled();
+
+    if (debug)
+    {
+        if (config.enableCudaKernel)
+        {
+            std::fprintf(stderr, "[fpA_intB launch] m=%d n=%d k=%d gs=%d sm=%d path=cuda_kernel\n",
+                m, n, k, group_size, sm);
+        }
+        else if (config.is_tma_warp_specialized)
+        {
+            std::fprintf(stderr, "[fpA_intB launch] m=%d n=%d k=%d gs=%d sm=%d path=tma_warp_specialized "
+                "tile90=%d mainloop=%d epilogue=%d cluster=%d\n",
+                m, n, k, group_size, sm,
+                static_cast<int>(config.tile_config_sm90),
+                static_cast<int>(config.mainloop_schedule),
+                static_cast<int>(config.epilogue_schedule),
+                static_cast<int>(config.cluster_shape));
+        }
+        else
+        {
+            std::fprintf(stderr, "[fpA_intB launch] m=%d n=%d k=%d gs=%d sm=%d path=sm80_cutlass "
+                "tile80=%d stages=%d split_k=%d\n",
+                m, n, k, group_size, sm,
+                static_cast<int>(config.tile_config_sm80), config.stages, config.split_k_factor);
+        }
+    }
+
     if (config.enableCudaKernel)
     {
         kernels::weight_only::Params params{A, nullptr, B, weight_scales, weight_zero_points, nullptr, C, 1.0f, m, n, k,
@@ -407,6 +435,16 @@ void fpA_intB_gemm_fp16_int4_gptq_with_config(half const* A, int8_t const* B, ha
 
     get_runner().gemm(A, reinterpret_cast<cutlass::uint4b_t const*>(B), weight_scales, weight_zero_points, nullptr,
         1.0f, C, m, n, k, group_size, config, reinterpret_cast<char*>(workspace), workspace_bytes, stream);
+
+    if (debug)
+    {
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess)
+        {
+            std::fprintf(stderr, "[fpA_intB launch] CUDA ERROR after gemm: %s (%d)\n",
+                cudaGetErrorString(err), static_cast<int>(err));
+        }
+    }
 }
 
 void fpA_intB_gemm_fp16_int4_gptq(half const* A, int8_t const* B, half const* weight_scales,

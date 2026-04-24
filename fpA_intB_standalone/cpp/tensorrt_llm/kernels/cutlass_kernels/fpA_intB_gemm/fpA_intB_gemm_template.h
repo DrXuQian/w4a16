@@ -219,6 +219,9 @@ void generic_mixed_gemm_kernelLauncher(ActivationType const* A, WeightType const
     {
         std::string err_msg
             = "Failed to initialize cutlass fpA_intB gemm. Error: " + std::string(cutlassGetStatusString(init_status));
+        std::fprintf(stderr, "[fpA_intB SM80] initialize FAILED: %s\n", err_msg.c_str());
+        std::fprintf(stderr, "[fpA_intB SM80] Device sm=%d. If sm>=90, ensure compiled with sm_90a (not sm_90)\n",
+            tensorrt_llm::common::getSMVersion());
         throw std::runtime_error("[TensorRT LLM Error][fpA_intB Runner] " + err_msg);
     }
 

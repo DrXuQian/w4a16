@@ -259,7 +259,9 @@ void sm90_generic_mixed_gemm_kernelLauncher(ActivationType const* A, WeightType 
         {
             std::string err_msg = "fpA_intB cutlass kernel will fail for params. Error: "
                 + std::string(cutlassGetStatusString(can_implement));
-            std::cout << err_msg << std::endl;
+            std::fprintf(stderr, "[fpA_intB SM90] can_implement FAILED: %s\n", err_msg.c_str());
+            std::fprintf(stderr, "[fpA_intB SM90] workspace=%p workspace_size=%zu\n",
+                workspace, workspace ? 0UL : 0UL);
             throw std::runtime_error("[TensorRT LLM Error][fpA_intB Runner] " + err_msg);
         }
 
@@ -268,6 +270,9 @@ void sm90_generic_mixed_gemm_kernelLauncher(ActivationType const* A, WeightType 
         {
             std::string err_msg = "Failed to initialize cutlass fpA_intB gemm. Error: "
                 + std::string(cutlassGetStatusString(init_status));
+            std::fprintf(stderr, "[fpA_intB SM90] initialize FAILED: %s\n", err_msg.c_str());
+            std::fprintf(stderr, "[fpA_intB SM90] Check: compiled with sm_90a? Device is sm_%d\n",
+                tensorrt_llm::common::getSMVersion());
             throw std::runtime_error("[TensorRT LLM Error][fpA_intB Runner] " + err_msg);
         }
 
@@ -276,6 +281,7 @@ void sm90_generic_mixed_gemm_kernelLauncher(ActivationType const* A, WeightType 
         {
             std::string err_msg
                 = "Failed to run cutlass fpA_intB gemm. Error: " + std::string(cutlassGetStatusString(run_status));
+            std::fprintf(stderr, "[fpA_intB SM90] run FAILED: %s\n", err_msg.c_str());
             throw std::runtime_error("[TensorRT LLM Error][fpA_intB Runner] " + err_msg);
         }
     }

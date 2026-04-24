@@ -25,11 +25,32 @@ inline int getSMVersion()
 {
     int device = 0;
     check_cuda_error(cudaGetDevice(&device));
-    int major = 0;
-    int minor = 0;
+    int major = 0, minor = 0;
     check_cuda_error(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device));
     check_cuda_error(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device));
-    return major * 10 + minor;
+    int sm = major * 10 + minor;
+
+    // Print device info once
+    static bool printed = false;
+    if (!printed)
+    {
+        printed = true;
+        cudaDeviceProp prop;
+        cudaGetDeviceProperties(&prop, device);
+        std::fprintf(stderr, "[fpA_intB] device=%d name=%s sm=%d.%d (sm_version=%d)\n",
+            device, prop.name, major, minor, sm);
+
+        // Check compiled arch
+#ifdef __CUDA_ARCH__
+        // This only works in device code, so we print the compile-time flags instead
+#endif
+#if defined(COMPILE_HOPPER_TMA_GEMMS) && COMPILE_HOPPER_TMA_GEMMS
+        std::fprintf(stderr, "[fpA_intB] compiled with: COMPILE_HOPPER_TMA_GEMMS=1\n");
+#else
+        std::fprintf(stderr, "[fpA_intB] compiled with: COMPILE_HOPPER_TMA_GEMMS=0 (SM90 TMA path DISABLED)\n");
+#endif
+    }
+    return sm;
 }
 } // namespace common
 
