@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <string>
 #include <vector>
@@ -33,6 +34,7 @@ struct Args
     bool list_configs = false;
     bool force_config = false;
     bool force_cuda = false;
+    std::string tactic_file;
     tensorrt_llm::cutlass_extensions::CutlassGemmConfig forced_config{};
 };
 
@@ -40,7 +42,7 @@ void print_usage(char const* name)
 {
     std::printf(
         "Usage: %s [--m=N] [--n=N] [--k=N] [--group_size=N] [--warmup=N] [--iters=N] [--verify] [--list_configs] "
-        "[--config=cuda|tile_m,tile_n,tile_k,stages,split_k] [--ncu]\n",
+        "[--config=cuda|tile_m,tile_n,tile_k,stages,split_k] [--tactic=<file>] [--ncu]\n",
         name);
 }
 
@@ -146,6 +148,91 @@ bool parse_config_spec(char const* spec, Args& args)
     return true;
 }
 
+// Tactic file: each line is "m,n,k,gs,config_idx"
+// config_idx is the index into fpA_intB_get_all_configs() list.
+bool load_tactic(std::string const& path, int m, int n, int k, int gs, int& config_idx)
+{
+    std::ifstream f(path);
+    if (!f.is_open())
+    {
+        return false;
+    }
+    std::string line;
+    while (std::getline(f, line))
+    {
+        if (line.empty() || line[0] == '#')
+        {
+            continue;
+        }
+        int fm, fn, fk, fgs, fidx;
+        if (std::sscanf(line.c_str(), "%d,%d,%d,%d,%d", &fm, &fn, &fk, &fgs, &fidx) == 5)
+        {
+            if (fm == m && fn == n && fk == k && fgs == gs)
+            {
+                config_idx = fidx;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void save_tactic(std::string const& path, int m, int n, int k, int gs, int config_idx)
+{
+    std::ofstream f(path, std::ios::app);
+    if (!f.is_open())
+    {
+        std::fprintf(stderr, "Warning: cannot write tactic file %s\n", path.c_str());
+        return;
+    }
+    f << m << "," << n << "," << k << "," << gs << "," << config_idx << "\n";
+}
+
+int find_config_index(tensorrt_llm::cutlass_extensions::CutlassGemmConfig const& config)
+{
+    using Config = tensorrt_llm::cutlass_extensions::CutlassGemmConfig;
+    Config const* configs = nullptr;
+    size_t const count = tensorrt_llm::kernels::cutlass_kernels_oss::fpA_intB_get_all_configs(&configs);
+    for (size_t i = 0; i < count; ++i)
+    {
+        auto const& c = configs[i];
+        if (config.enableCudaKernel != c.enableCudaKernel)
+        {
+            continue;
+        }
+        if (config.enableCudaKernel)
+        {
+            return static_cast<int>(i); // all cuda configs are equivalent
+        }
+        if (config.is_tma_warp_specialized != c.is_tma_warp_specialized)
+        {
+            continue;
+        }
+        if (config.is_tma_warp_specialized)
+        {
+            // SM90+ TMA configs: match by SM90 tile + schedules + cluster
+            if (config.tile_config_sm90 == c.tile_config_sm90
+                && config.mainloop_schedule == c.mainloop_schedule
+                && config.epilogue_schedule == c.epilogue_schedule
+                && config.cluster_shape == c.cluster_shape)
+            {
+                return static_cast<int>(i);
+            }
+        }
+        else
+        {
+            // SM80 configs: match by tile + stages + split_k
+            if (config.tile_config_sm80 == c.tile_config_sm80
+                && config.stages == c.stages
+                && config.split_k_factor == c.split_k_factor)
+            {
+                return static_cast<int>(i);
+            }
+        }
+    }
+    return -1;
+}
+
 void parse_args(int argc, char** argv, Args& args)
 {
     for (int i = 1; i < argc; ++i)
@@ -205,6 +292,11 @@ void parse_args(int argc, char** argv, Args& args)
                 print_usage(argv[0]);
                 std::exit(1);
             }
+            continue;
+        }
+        if (std::strncmp(argv[i], "--tactic=", 9) == 0)
+        {
+            args.tactic_file = argv[i] + 9;
             continue;
         }
         std::fprintf(stderr, "Unknown argument: %s\n", argv[i]);
@@ -472,6 +564,7 @@ int main(int argc, char** argv)
     std::fflush(stdout);
 
     tensorrt_llm::cutlass_extensions::CutlassGemmConfig config{};
+    bool tactic_hit = false;
     if (args.force_config)
     {
         if (args.force_cuda)
@@ -490,6 +583,45 @@ int main(int argc, char** argv)
         {
             std::fprintf(stderr, "Forced config not supported. Use --list_configs.\n");
             return 1;
+        }
+    }
+    else if (!args.tactic_file.empty())
+    {
+        // Try loading from tactic file first
+        int cached_idx = -1;
+        if (load_tactic(args.tactic_file, args.m, args.n, args.k, args.group_size, cached_idx))
+        {
+            tensorrt_llm::cutlass_extensions::CutlassGemmConfig const* configs = nullptr;
+            size_t const count = tensorrt_llm::kernels::cutlass_kernels_oss::fpA_intB_get_all_configs(&configs);
+            if (cached_idx >= 0 && cached_idx < static_cast<int>(count))
+            {
+                config = configs[cached_idx];
+                tactic_hit = true;
+                std::printf("tactic cache HIT: idx=%d from %s\n", cached_idx, args.tactic_file.c_str());
+            }
+            else
+            {
+                std::fprintf(stderr, "tactic cache: invalid index %d (max %zu), will re-profile\n",
+                    cached_idx, count);
+            }
+        }
+        if (!tactic_hit)
+        {
+            // Miss: profile and save
+            std::printf("tactic cache MISS: profiling...\n");
+            bool ok = tensorrt_llm::kernels::cutlass_kernels_oss::fpA_intB_select_config_fp16_int4_gptq(
+                config, args.m, args.n, args.k, args.group_size, 0, true);
+            if (!ok)
+            {
+                std::fprintf(stderr, "No valid config found for the given shape.\n");
+                return 1;
+            }
+            int idx = find_config_index(config);
+            if (idx >= 0)
+            {
+                save_tactic(args.tactic_file, args.m, args.n, args.k, args.group_size, idx);
+                std::printf("tactic saved: idx=%d to %s\n", idx, args.tactic_file.c_str());
+            }
         }
     }
     else
