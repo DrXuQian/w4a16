@@ -50,10 +50,6 @@ FPA_INTB_PROFILE_LOG=1 ./test_fpA_intB_gemm --m=3823 --n=4096 --k=4096 --group_s
 # Single inference, no profiling, no warmup (GPU only runs the GEMM kernel)
 ./test_fpA_intB_gemm --m=1 --n=12288 --k=3072 --group_size=128 \
     --tactic=tactics.cache --warmup=0 --iters=1
-
-# Nsight Compute profiling (tactic cache avoids profiling kernel launches)
-ncu --set full ./test_fpA_intB_gemm --m=1 --n=12288 --k=3072 --group_size=128 \
-    --tactic=tactics.cache --warmup=0 --iters=1
 ```
 
 ### Tactic cache
