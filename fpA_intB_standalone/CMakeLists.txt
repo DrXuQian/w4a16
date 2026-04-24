@@ -36,6 +36,8 @@ set(FPA_INTB_SOURCES
 )
 
 add_library(fpA_intB_gemm STATIC ${FPA_INTB_SOURCES})
+set_property(TARGET fpA_intB_gemm PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+set_property(TARGET fpA_intB_gemm PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
 
 set(FPA_INTB_COMPILE_DEFS
     ENABLE_BF16=0
@@ -67,6 +69,7 @@ target_link_libraries(fpA_intB_gemm
 )
 
 add_executable(test_fpA_intB_gemm test/test_fpA_intB_gemm.cu)
+set_property(TARGET test_fpA_intB_gemm PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
 
 target_link_libraries(test_fpA_intB_gemm
     fpA_intB_gemm
@@ -83,6 +86,7 @@ target_compile_options(test_fpA_intB_gemm PRIVATE
 
 # SM90 GEMM init diagnostic (links fpA_intB_gemm, fast to compile)
 add_executable(test_sm90_gemm_init test/test_sm90_gemm_init.cu)
+set_property(TARGET test_sm90_gemm_init PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
 target_link_libraries(test_sm90_gemm_init fpA_intB_gemm CUDA::cudart)
 target_compile_definitions(test_sm90_gemm_init PRIVATE ${FPA_INTB_COMPILE_DEFS})
 target_compile_options(test_sm90_gemm_init PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
