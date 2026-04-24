@@ -1,174 +1,139 @@
 /*
- * Minimal test: reproduce CUTLASS SM90 mixed-input GEMM initialize() failure.
- * Single file, only needs CUTLASS headers + this repo's cutlass_extensions.
+ * Minimal test: reproduce fpA_intB SM90 initialize() failure.
+ * Uses the existing fpA_intB library (no need to duplicate CUTLASS types).
  *
- * Build (from fpA_intB_standalone/):
+ * Build (from fpA_intB_standalone/build/):
+ *   Already built as part of cmake. Or manually:
  *   nvcc -O2 -std=c++17 -arch=sm_90a --expt-relaxed-constexpr \
- *     -I cpp/include -I cpp -I cpp/tensorrt_llm -I cpp/tensorrt_llm/cutlass_extensions/include \
+ *     -I ../cpp/include -I ../cpp -I ../cpp/tensorrt_llm \
+ *     -I ../cpp/tensorrt_llm/cutlass_extensions/include \
  *     -I <CUTLASS>/include \
- *     test/test_sm90_gemm_init.cu -o test_sm90_gemm_init
+ *     ../test/test_sm90_gemm_init.cu -L. -lfpA_intB_gemm -lcudart -o test_sm90_gemm_init
  *
  * Run:
- *   ./test_sm90_gemm_init
+ *   FPA_INTB_PROFILE_LOG=1 ./test_sm90_gemm_init
  */
 
-#include <cuda_runtime.h>
-#include <cuda_fp16.h>
+#include "tensorrt_llm/common/cudaUtils.h"
+#include "tensorrt_llm/kernels/cutlass_kernels/cutlass_preprocessors.h"
+#include "tensorrt_llm/kernels/cutlass_kernels/fpA_intB_gemm/launchers/fpA_intB_gemm_sm80_wrappers.h"
+
 #include <cstdio>
 #include <cstdlib>
-
-// CUTLASS
-#include "cute/tensor.hpp"
-#include "cutlass/cutlass.h"
-#include "cutlass/gemm/device/gemm_universal_adapter.h"
-#include "cutlass/gemm/kernel/gemm_universal.hpp"
-#include "cutlass/gemm/collective/collective_builder.hpp"
-#include "cutlass/epilogue/collective/collective_builder.hpp"
-#include "cutlass/epilogue/collective/default_epilogue.hpp"
-#include "cutlass/epilogue/thread/linear_combination.h"
-#include "cutlass/gemm/dispatch_policy.hpp"
-#include "cutlass/util/packed_stride.hpp"
-
-// TRT-LLM cutlass extensions
-#include "cutlass_extensions/gemm/collective/collective_builder_interleaved.hpp"
-#include "cutlass_extensions/epilogue_helpers.h"
-
-using namespace cute;
+#include <cstring>
+#include <vector>
 
 int main() {
+    // Print device info
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, 0);
     printf("Device: %s (sm_%d%d)\n", prop.name, prop.major, prop.minor);
-    printf("Max shared mem per block (optin): %zu bytes\n\n", prop.sharedMemPerBlockOptin);
+    printf("Max shared mem per block (optin): %zu bytes\n", prop.sharedMemPerBlockOptin);
+    printf("CUDA driver: ");
+    int driver = 0, runtime = 0;
+    cudaDriverGetVersion(&driver);
+    cudaRuntimeGetVersion(&runtime);
+    printf("%d.%d, runtime: %d.%d\n\n", driver/1000, (driver%100)/10, runtime/1000, (runtime%100)/10);
 
-    // Exactly matches the failing config: tile=128x256x128, cluster=2x1x1
-    using ActivationType = cutlass::half_t;
-    using WeightType = cutlass::uint4b_t;
-    using ScaleType = cutlass::half_t;
-    using OutputType = cutlass::half_t;
-    using ElementAccumulator = float;
+    int M = 128, N = 256, K = 128, group_size = 128;
+    printf("Test shape: M=%d N=%d K=%d group_size=%d\n\n", M, N, K, group_size);
 
-    using ArchTag = cutlass::arch::Sm90;
-    using OperatorClass = cutlass::arch::OpClassTensorOp;
+    // Quantize dummy weights
+    std::vector<half> h_a(M * K);
+    std::vector<half> h_w(K * N);
+    for (size_t i = 0; i < h_a.size(); i++) h_a[i] = __float2half_rn(0.01f);
+    for (size_t i = 0; i < h_w.size(); i++) h_w[i] = __float2half_rn(0.02f);
 
-    // The failing tile + cluster from the error log
-    using TileShape = Shape<_128, _256, cute::Int<128>>;
-    using ClusterShape = Shape<_2, _1, _1>;
+    int groups = K / group_size;
+    std::vector<half> h_scales(groups * N);
+    std::vector<half> h_zeros(groups * N);
+    std::vector<int8_t> h_packed(K * N / 2);
+    for (auto& v : h_scales) v = __float2half_rn(0.01f);
+    for (auto& v : h_zeros) v = __float2half_rn(0.0f);
+    for (auto& v : h_packed) v = 0x55;  // nibbles = 5,5
 
-    using KernelSchedule = cutlass::gemm::KernelTmaWarpSpecializedPingpong;
-    using EpilogueSchedule = cutlass::epilogue::TmaWarpSpecialized;
+    // Preprocess weights
+    std::vector<int8_t> h_preprocessed(h_packed.size());
+    std::vector<size_t> shape = {(size_t)K, (size_t)N};
+    tensorrt_llm::kernels::cutlass_kernels::preprocess_weights_for_mixed_gemm(
+        h_preprocessed.data(), h_packed.data(), shape,
+        tensorrt_llm::kernels::cutlass_kernels::QuantType::W4_A16, false);
 
-    constexpr int AlignmentA = 128 / cutlass::sizeof_bits<ActivationType>::value;  // 8
-    constexpr int AlignmentB = 128 / cutlass::sizeof_bits<WeightType>::value;      // 32
+    // Device alloc
+    half *d_a, *d_scales, *d_zeros, *d_c;
+    int8_t *d_b;
+    cudaMalloc(&d_a, M * K * sizeof(half));
+    cudaMalloc(&d_b, h_preprocessed.size());
+    cudaMalloc(&d_scales, groups * N * sizeof(half));
+    cudaMalloc(&d_zeros, groups * N * sizeof(half));
+    cudaMalloc(&d_c, M * N * sizeof(half));
 
-    using LayoutA = cutlass::layout::RowMajor;
-    using LayoutB = cutlass::layout::ColumnMajor;
-    using LayoutA_T = cutlass::layout::ColumnMajor;
-    using LayoutB_T = cutlass::layout::RowMajor;
+    cudaMemcpy(d_a, h_a.data(), M * K * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_b, h_preprocessed.data(), h_preprocessed.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_scales, h_scales.data(), groups * N * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_zeros, h_zeros.data(), groups * N * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemset(d_c, 0, M * N * sizeof(half));
 
-    constexpr int epi_tile_M = 128;
-    constexpr int epi_tile_N = 32;
-    using EpilogueTileType = Shape<cute::Int<epi_tile_M>, cute::Int<epi_tile_N>>;
-
-    // Simple epilogue: just alpha * acc (no bias)
-    using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
-        ArchTag, OperatorClass, TileShape, ClusterShape, EpilogueTileType,
-        ElementAccumulator, ElementAccumulator,
-        void, LayoutA_T, AlignmentA,  // C (unused)
-        OutputType, LayoutA_T, AlignmentA,  // D
-        EpilogueSchedule>::CollectiveOp;
-
-    // Mixed-input mainloop with interleaved weights (same as fpA_intB)
-    using PackedScale = cute::tuple<WeightType, ScaleType>;
-    using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilderInterleaved<
-        ArchTag, OperatorClass,
-        PackedScale, LayoutB_T, AlignmentB,
-        ActivationType, LayoutA_T, AlignmentA,
-        ElementAccumulator, TileShape, ClusterShape,
-        cutlass::gemm::collective::StageCountAutoCarveout<
-            static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
-        KernelSchedule>::CollectiveOp;
-
-    using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
-        Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue,
-        cutlass::gemm::PersistentScheduler>;
-    using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
-
-    // Print kernel shared memory requirement
-    int smem_size = static_cast<int>(sizeof(typename GemmKernel::SharedStorage));
-    printf("Kernel SharedStorage size: %d bytes\n", smem_size);
-    printf("Device max shared mem:     %zu bytes\n", prop.sharedMemPerBlockOptin);
-    printf("Fits: %s\n\n", smem_size <= (int)prop.sharedMemPerBlockOptin ? "YES" : "NO *** WILL FAIL ***");
-
-    // Test cudaFuncSetAttribute
-    printf("Testing cudaFuncSetAttribute for %d bytes...\n", smem_size);
-    auto attr_err = cudaFuncSetAttribute(
-        cutlass::device_kernel<GemmKernel>,
-        cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
-    printf("Result: %s\n\n", attr_err == cudaSuccess ? "OK" : cudaGetErrorString(attr_err));
-
-    // Allocate minimal buffers and test initialize()
-    int M = 128, N = 256, K = 128;
-    printf("Testing gemm.initialize() with M=%d N=%d K=%d...\n", M, N, K);
-
-    half *d_A, *d_C;
-    uint8_t *d_B;
-    half *d_scales;
-    cudaMalloc(&d_A, M * K * sizeof(half));
-    cudaMalloc(&d_B, K * N / 2);
-    cudaMalloc(&d_C, M * N * sizeof(half));
-    cudaMalloc(&d_scales, (K / 128) * N * sizeof(half));
-
-    using StrideA = typename GemmKernel::StrideA;
-    using StrideB = typename GemmKernel::StrideB;
-    using StrideD = typename GemmKernel::StrideD;
-
-    // Note: A and B are swapped in the kernel (transpose trick)
-    StrideA stride_B = cutlass::make_cute_packed_stride(StrideA{}, {N, K, 1});
-    StrideB stride_A = cutlass::make_cute_packed_stride(StrideB{}, {M, K, 1});
-    StrideD stride_D = cutlass::make_cute_packed_stride(StrideD{}, {N, M, 1});
-
-    int group_size = 128;
-    int groups_per_k = K / group_size;
-    using StrideS = typename CollectiveMainloop::StrideScale;
-    StrideS stride_S = cutlass::make_cute_packed_stride(StrideS{}, {groups_per_k, N, 1});
-
-    typename Gemm::Arguments args{
-        cutlass::gemm::GemmUniversalMode::kGemm,
-        {N, M, K, 1},
-        {reinterpret_cast<WeightType const*>(d_B), stride_B,
-         reinterpret_cast<ActivationType const*>(d_A), stride_A,
-         reinterpret_cast<ScaleType const*>(d_scales), stride_S, group_size},
-        {{1.0f}, {}, {}, reinterpret_cast<OutputType*>(d_C), stride_D}
-    };
-
-    Gemm gemm;
-
-    auto can = gemm.can_implement(args);
-    printf("can_implement: %s\n", cutlassGetStatusString(can));
-
-    size_t ws_size = gemm.get_workspace_size(args);
-    printf("workspace_size: %zu\n", ws_size);
+    size_t ws_bytes = tensorrt_llm::kernels::cutlass_kernels_oss::fpA_intB_get_workspace_size(M, N, K);
     void* d_ws = nullptr;
-    if (ws_size > 0) cudaMalloc(&d_ws, ws_size);
+    if (ws_bytes > 0) cudaMalloc(&d_ws, ws_bytes);
+    printf("Workspace: %zu bytes\n\n", ws_bytes);
 
-    auto init = gemm.initialize(args, d_ws);
-    printf("initialize: %s\n", cutlassGetStatusString(init));
+    // List all configs
+    using Config = tensorrt_llm::cutlass_extensions::CutlassGemmConfig;
+    Config const* configs = nullptr;
+    size_t count = tensorrt_llm::kernels::cutlass_kernels_oss::fpA_intB_get_all_configs(&configs);
+    printf("Total configs: %zu\n\n", count);
 
-    if (init == cutlass::Status::kSuccess) {
-        auto run = gemm.run();
-        cudaDeviceSynchronize();
-        printf("run: %s\n", cutlassGetStatusString(run));
-        cudaError_t err = cudaGetLastError();
-        printf("cuda after run: %s\n", err == cudaSuccess ? "OK" : cudaGetErrorString(err));
-        printf("\nPASS\n");
-    } else {
-        cudaError_t err = cudaGetLastError();
-        printf("cuda error: %s\n", err == cudaSuccess ? "none" : cudaGetErrorString(err));
-        printf("\nFAIL\n");
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    // Try each config one by one
+    int pass = 0, fail = 0;
+    for (size_t i = 0; i < count; i++) {
+        auto const& cfg = configs[i];
+
+        const char* path = "unknown";
+        if (cfg.enableCudaKernel) path = "cuda_kernel";
+        else if (cfg.is_tma_warp_specialized) path = "tma_ws";
+        else path = "sm80";
+
+        printf("Config %2zu [%s]: ", i, path);
+        if (cfg.is_tma_warp_specialized) {
+            printf("tile=%d ml=%d el=%d cl=%d ",
+                cfg.getTileConfigAsInt(),
+                (int)cfg.mainloop_schedule, (int)cfg.epilogue_schedule,
+                (int)cfg.cluster_shape);
+        }
+
+        try {
+            tensorrt_llm::kernels::cutlass_kernels_oss::fpA_intB_gemm_fp16_int4_gptq_with_config(
+                d_a, d_b, d_scales, d_zeros, d_c,
+                M, N, K, group_size, stream, d_ws, ws_bytes, cfg);
+            cudaStreamSynchronize(stream);
+            cudaError_t err = cudaGetLastError();
+            if (err == cudaSuccess) {
+                printf("PASS\n");
+                pass++;
+            } else {
+                printf("CUDA ERROR: %s\n", cudaGetErrorString(err));
+                fail++;
+                // Reset error state
+                cudaGetLastError();
+            }
+        } catch (std::exception const& e) {
+            printf("EXCEPTION: %s\n", e.what());
+            fail++;
+            cudaGetLastError();  // clear
+        }
     }
 
-    cudaFree(d_A); cudaFree(d_B); cudaFree(d_C); cudaFree(d_scales);
+    printf("\n========================================\n");
+    printf("Results: %d PASS, %d FAIL out of %zu configs\n", pass, fail, count);
+    printf("========================================\n");
+
+    cudaStreamDestroy(stream);
+    cudaFree(d_a); cudaFree(d_b); cudaFree(d_scales); cudaFree(d_zeros); cudaFree(d_c);
     if (d_ws) cudaFree(d_ws);
-    return 0;
+    return fail > 0 ? 1 : 0;
 }

@@ -72,3 +72,9 @@ target_compile_definitions(test_fpA_intB_gemm PRIVATE
 target_compile_options(test_fpA_intB_gemm PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
 )
+
+# SM90 GEMM init diagnostic (links fpA_intB_gemm, fast to compile)
+add_executable(test_sm90_gemm_init test/test_sm90_gemm_init.cu)
+target_link_libraries(test_sm90_gemm_init fpA_intB_gemm CUDA::cudart)
+target_compile_definitions(test_sm90_gemm_init PRIVATE ${FPA_INTB_COMPILE_DEFS})
+target_compile_options(test_sm90_gemm_init PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
