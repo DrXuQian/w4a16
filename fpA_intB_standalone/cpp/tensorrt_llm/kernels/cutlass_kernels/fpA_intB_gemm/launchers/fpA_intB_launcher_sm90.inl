@@ -249,6 +249,28 @@ void sm90_generic_mixed_gemm_kernelLauncher(ActivationType const* A, WeightType 
         };
 
         Gemm gemm;
+
+        // Diagnostic: print kernel shared memory requirement
+        {
+            int smem_size = static_cast<int>(sizeof(typename Gemm::GemmKernel::SharedStorage));
+            int device = 0;
+            cudaGetDevice(&device);
+            int max_smem = 0;
+            cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+            std::fprintf(stderr, "[fpA_intB SM90 diag] kernel shared_storage=%d bytes, device max=%d bytes %s\n",
+                smem_size, max_smem, smem_size > max_smem ? "*** EXCEEDS LIMIT ***" : "(OK)");
+
+            // Try setting shared memory attribute directly
+            auto attr_err = cudaFuncSetAttribute(
+                cutlass::device_kernel<typename Gemm::GemmKernel>,
+                cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+            if (attr_err != cudaSuccess)
+            {
+                std::fprintf(stderr, "[fpA_intB SM90 diag] cudaFuncSetAttribute FAILED: %s (%d)\n",
+                    cudaGetErrorString(attr_err), static_cast<int>(attr_err));
+            }
+        }
+
         if (gemm.get_workspace_size(args) > workspace_bytes)
         {
             TLLM_LOG_ERROR("[TensorRT LLM Error][fpA_intB Runner] given workspace size insufficient.");
