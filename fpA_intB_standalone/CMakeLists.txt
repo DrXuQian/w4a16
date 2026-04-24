@@ -9,6 +9,24 @@ if (NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     set(CMAKE_CUDA_ARCHITECTURES 80)
 endif()
 
+# CMake < 3.28 doesn't support the 'a' suffix in CMAKE_CUDA_ARCHITECTURES.
+# Detect "90a" and force -arch=sm_90a via raw nvcc flags instead.
+set(FORCE_SM90A FALSE)
+foreach(arch IN LISTS CMAKE_CUDA_ARCHITECTURES)
+    if(arch MATCHES "^90a")
+        set(FORCE_SM90A TRUE)
+        # Replace 90a with 90 so CMake doesn't choke, we add -arch=sm_90a manually
+        list(REMOVE_ITEM CMAKE_CUDA_ARCHITECTURES "${arch}")
+        list(APPEND CMAKE_CUDA_ARCHITECTURES 90)
+        break()
+    endif()
+endforeach()
+if(FORCE_SM90A)
+    set(CMAKE_CUDA_ARCHITECTURES 90)
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -gencode arch=compute_90a,code=sm_90a")
+    message(STATUS "Forcing sm_90a via raw nvcc flags (CMake < 3.28 workaround)")
+endif()
+
 find_package(CUDAToolkit REQUIRED)
 
 set(CUTLASS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/cutlass" CACHE PATH "Path to CUTLASS")
