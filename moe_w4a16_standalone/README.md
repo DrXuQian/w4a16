@@ -114,11 +114,10 @@ moe_w4a16_standalone/build_nvcc/test_moe_w4a16_gemm \
 Use the H800 tactic cache:
 
 ```
-cd moe_w4a16_standalone/build_sm90
-./test_moe_w4a16_gemm \
+moe_w4a16_standalone/build_nvcc/test_moe_w4a16_gemm \
   --dtype=fp16 --experts=8 --m_per_expert=1 --n=1024 --k=3072 \
   --group_size=128 --warmup=100 --iters=1000 \
-  --tactic=../tactics_h800.cache
+  --tactic=moe_w4a16_standalone/tactics_h800.cache
 ```
 
 Qwen MoE shapes in `tactics_h800.cache`
