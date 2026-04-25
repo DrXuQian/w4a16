@@ -61,12 +61,25 @@ Use `GPU_ARCH=sm_80` for an Ampere build.
 The Makefile probes whether the CUDA compiler accepts Clang's
 `-fno-cuda-host-device-constexpr` option and enables it automatically when
 available. If a Clang/PPU wrapper still fails with an `fpclassify` host/device
-constexpr overload error, force the compatibility flag:
+constexpr overload error while including `/usr/include/c++/13/cmath`, use an
+older host compiler for both C++ and CUDA host compilation:
 
 ```
 make -f fpA_intB_standalone/Makefile.nvcc \
   GPU_ARCH=sm_90a \
   CUTLASS_DIR=$PWD/../../third_party/cutlass \
+  CXX=/usr/bin/g++-12 \
+  HOST_CXX=/usr/bin/g++-12
+```
+
+If the wrapper also requires the Clang CUDA constexpr workaround, force it:
+
+```
+make -f fpA_intB_standalone/Makefile.nvcc \
+  GPU_ARCH=sm_90a \
+  CUTLASS_DIR=$PWD/../../third_party/cutlass \
+  CXX=/usr/bin/g++-12 \
+  HOST_CXX=/usr/bin/g++-12 \
   CLANG_CUDA_COMPAT=1
 ```
 

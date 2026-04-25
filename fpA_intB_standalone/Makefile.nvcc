@@ -1,7 +1,12 @@
 THIS_DIR := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 
 NVCC ?= nvcc
+_DEFAULT_CXX := $(shell command -v g++-12 2>/dev/null || command -v g++-11 2>/dev/null || command -v g++ 2>/dev/null || command -v c++ 2>/dev/null)
+ifeq ($(origin CXX),default)
+CXX := $(_DEFAULT_CXX)
+endif
 CXX ?= c++
+HOST_CXX ?= $(CXX)
 GPU_ARCH ?= sm_90a
 BUILD_DIR ?= $(THIS_DIR)/build_nvcc
 TARGET ?= $(BUILD_DIR)/test_fpA_intB_gemm
@@ -60,7 +65,7 @@ ifneq (,$(findstring sm_90,$(GPU_ARCH)))
 DEFS += -DCOMPILE_HOPPER_TMA_GEMMS=1 -DCUTLASS_ARCH_MMA_SM90_SUPPORTED=1
 endif
 
-NVCCFLAGS := $(OPT) $(STD) -DNDEBUG -arch=$(GPU_ARCH) --expt-relaxed-constexpr $(EXTRA_NVCCFLAGS)
+NVCCFLAGS := $(OPT) $(STD) -DNDEBUG -ccbin=$(HOST_CXX) -arch=$(GPU_ARCH) --expt-relaxed-constexpr $(EXTRA_NVCCFLAGS)
 CXXFLAGS := $(OPT) $(STD) -DNDEBUG $(EXTRA_CXXFLAGS)
 INCLUDES := $(addprefix -I,$(INCLUDE_DIRS))
 
@@ -100,6 +105,7 @@ $(BUILD_DIR)/obj/%.cpp.o: $(THIS_DIR)/%.cpp
 print:
 	@printf 'NVCC=%s\n' '$(NVCC)'
 	@printf 'CXX=%s\n' '$(CXX)'
+	@printf 'HOST_CXX=%s\n' '$(HOST_CXX)'
 	@printf 'GPU_ARCH=%s\n' '$(GPU_ARCH)'
 	@printf 'CUTLASS_DIR=%s\n' '$(CUTLASS_DIR)'
 	@printf 'CUDA_HOME=%s\n' '$(CUDA_HOME)'
