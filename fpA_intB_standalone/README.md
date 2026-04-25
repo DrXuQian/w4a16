@@ -47,59 +47,37 @@ Input/weight layout assumptions
 
 Build
 -----
-From the repo root:
+From the repo root, use the direct `nvcc` Makefile. This avoids CMake CUDA
+architecture rewriting and does not build an intermediate static library.
 
 ```
-cmake -S fpA_intB_standalone -B fpA_intB_standalone/build_sm80 \
-  -DCMAKE_CUDA_ARCHITECTURES=80 \
-  -DCUTLASS_DIR=$HOME/TensorRT-LLM/3rdparty/cutlass
-cmake --build fpA_intB_standalone/build_sm80 -j8
+make -f fpA_intB_standalone/Makefile.nvcc \
+  GPU_ARCH=sm_90a \
+  CUTLASS_DIR=$HOME/TensorRT-LLM/3rdparty/cutlass
 ```
 
-Build for Hopper (SM90):
-
-```
-cmake -S fpA_intB_standalone -B fpA_intB_standalone/build_sm90 \
-  -DCMAKE_CUDA_ARCHITECTURES=90a-real \
-  -DCUTLASS_DIR=$HOME/TensorRT-LLM/3rdparty/cutlass
-cmake --build fpA_intB_standalone/build_sm90 -j8
-```
-
-For CMake versions that do not understand the `90a` suffix, use the raw nvcc
-override. The CMakeLists disables CMake's own architecture flag emission for
-this standalone target, so do not also pass `CMAKE_CUDA_FLAGS=-arch=...`.
-
-```
-cmake -S fpA_intB_standalone -B fpA_intB_standalone/build_sm90a \
-  -DGPU_ARCH=sm_90a \
-  -DCUTLASS_DIR=$HOME/TensorRT-LLM/3rdparty/cutlass
-cmake --build fpA_intB_standalone/build_sm90a -j8
-```
-
-Use a clean build directory when switching between `sm_90` and `sm_90a`.
-Hopper TMA/WGMMA kernels must be compiled as `sm_90a`; compiling both `sm_90`
-and `sm_90a` in the same workaround build can make debugging device-image
-selection ambiguous.
+The output binary is `fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm`.
+Use `GPU_ARCH=sm_80` for an Ampere build.
 
 Run
 ---
 Example:
 
 ```
-fpA_intB_standalone/build_sm80/test_fpA_intB_gemm \
+fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm \
   --m=1 --n=4096 --k=4096 --group_size=128
 ```
 
 List configs:
 
 ```
-fpA_intB_standalone/build_sm80/test_fpA_intB_gemm --list_configs
+fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm --list_configs
 ```
 
 Force CUDA kernel:
 
 ```
-fpA_intB_standalone/build_sm80/test_fpA_intB_gemm \
+fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm \
   --m=1 --n=4096 --k=4096 --group_size=128 \
   --config=cuda
 ```
@@ -107,7 +85,7 @@ fpA_intB_standalone/build_sm80/test_fpA_intB_gemm \
 Force a CUTLASS config (tile_m,tile_n,tile_k,stages,split_k):
 
 ```
-fpA_intB_standalone/build_sm80/test_fpA_intB_gemm \
+fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm \
   --m=1 --n=4096 --k=4096 --group_size=128 \
   --config=16x128x64x3x1
 ```

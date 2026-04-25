@@ -67,51 +67,46 @@ Input/weight layout assumptions
 
 Build
 -----
-From the repo root:
+From the repo root, use the direct `nvcc` Makefile. The current W4A16
+groupwise MoE path still uses the SM80 grouped GEMM fallback on Hopper, but the
+binary itself is compiled with the requested `-arch`.
 
 ```
-cmake -S moe_w4a16_standalone -B moe_w4a16_standalone/build_sm80 \
-  -DCMAKE_CUDA_ARCHITECTURES=80 \
-  -DCUTLASS_DIR=$HOME/TensorRT-LLM/3rdparty/cutlass
-cmake --build moe_w4a16_standalone/build_sm80 -j8
+make -f moe_w4a16_standalone/Makefile.nvcc \
+  GPU_ARCH=sm_90a \
+  CUTLASS_DIR=$HOME/TensorRT-LLM/3rdparty/cutlass
 ```
 
-Build for Hopper while still using the SM80 MoE W4A16 kernel path:
-
-```
-cmake -S moe_w4a16_standalone -B moe_w4a16_standalone/build_sm90 \
-  -DCMAKE_CUDA_ARCHITECTURES=90-real \
-  -DCUTLASS_DIR=$HOME/TensorRT-LLM/3rdparty/cutlass
-cmake --build moe_w4a16_standalone/build_sm90 -j8
-```
+The output binary is `moe_w4a16_standalone/build_nvcc/test_moe_w4a16_gemm`.
+Use `GPU_ARCH=sm_80` for an Ampere build.
 
 Run
 ---
 FP16 sanity check:
 
 ```
-moe_w4a16_standalone/build_sm80/test_moe_w4a16_gemm \
+moe_w4a16_standalone/build_nvcc/test_moe_w4a16_gemm \
   --dtype=fp16 --experts=4 --m_per_expert=16 --n=128 --k=128 --verify
 ```
 
 BF16 sanity check:
 
 ```
-moe_w4a16_standalone/build_sm80/test_moe_w4a16_gemm \
+moe_w4a16_standalone/build_nvcc/test_moe_w4a16_gemm \
   --dtype=bf16 --experts=4 --m_per_expert=16 --n=128 --k=128 --verify
 ```
 
 List configs:
 
 ```
-moe_w4a16_standalone/build_sm80/test_moe_w4a16_gemm \
+moe_w4a16_standalone/build_nvcc/test_moe_w4a16_gemm \
   --dtype=fp16 --list_configs
 ```
 
 Sweep configs for one shape:
 
 ```
-moe_w4a16_standalone/build_sm80/test_moe_w4a16_gemm \
+moe_w4a16_standalone/build_nvcc/test_moe_w4a16_gemm \
   --dtype=fp16 --experts=8 --m_per_expert=1 --n=1024 --k=3072 \
   --group_size=128 --warmup=100 --iters=1000 --sweep_configs
 ```

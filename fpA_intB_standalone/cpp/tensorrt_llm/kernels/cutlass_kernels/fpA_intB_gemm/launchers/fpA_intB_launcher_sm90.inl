@@ -249,28 +249,6 @@ void sm90_generic_mixed_gemm_kernelLauncher(ActivationType const* A, WeightType 
         };
 
         Gemm gemm;
-
-        // Diagnostic: print kernel shared memory requirement
-        {
-            int smem_size = static_cast<int>(sizeof(typename Gemm::GemmKernel::SharedStorage));
-            int device = 0;
-            cudaGetDevice(&device);
-            int max_smem = 0;
-            cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
-            std::fprintf(stderr, "[fpA_intB SM90 diag] kernel shared_storage=%d bytes, device max=%d bytes %s\n",
-                smem_size, max_smem, smem_size > max_smem ? "*** EXCEEDS LIMIT ***" : "(OK)");
-
-            // Try setting shared memory attribute directly
-            auto attr_err = cudaFuncSetAttribute(
-                cutlass::device_kernel<typename Gemm::GemmKernel>,
-                cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
-            if (attr_err != cudaSuccess)
-            {
-                std::fprintf(stderr, "[fpA_intB SM90 diag] cudaFuncSetAttribute FAILED: %s (%d)\n",
-                    cudaGetErrorString(attr_err), static_cast<int>(attr_err));
-            }
-        }
-
         if (gemm.get_workspace_size(args) > workspace_bytes)
         {
             TLLM_LOG_ERROR("[TensorRT LLM Error][fpA_intB Runner] given workspace size insufficient.");
@@ -281,22 +259,8 @@ void sm90_generic_mixed_gemm_kernelLauncher(ActivationType const* A, WeightType 
         {
             std::string err_msg = "fpA_intB cutlass kernel will fail for params. Error: "
                 + std::string(cutlassGetStatusString(can_implement));
-            std::fprintf(stderr, "[fpA_intB SM90] can_implement FAILED: %s\n", err_msg.c_str());
-            std::fprintf(stderr, "[fpA_intB SM90] workspace=%p workspace_size=%zu\n",
-                workspace, workspace ? 0UL : 0UL);
+            std::cout << err_msg << std::endl;
             throw std::runtime_error("[TensorRT LLM Error][fpA_intB Runner] " + err_msg);
-        }
-
-        // Debug: print workspace and shared memory info before initialize
-        {
-            size_t needed_ws = gemm.get_workspace_size(args);
-            int device = 0;
-            cudaGetDevice(&device);
-            int max_smem = 0;
-            cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
-            std::fprintf(stderr, "[fpA_intB SM90] workspace: needed=%zu provided=%zu\n",
-                needed_ws, workspace_bytes);
-            std::fprintf(stderr, "[fpA_intB SM90] device max_shared_mem_per_block=%d bytes\n", max_smem);
         }
 
         auto init_status = gemm.initialize(args, workspace, stream);
@@ -304,21 +268,6 @@ void sm90_generic_mixed_gemm_kernelLauncher(ActivationType const* A, WeightType 
         {
             std::string err_msg = "Failed to initialize cutlass fpA_intB gemm. Error: "
                 + std::string(cutlassGetStatusString(init_status));
-            std::fprintf(stderr, "[fpA_intB SM90] initialize FAILED: %s\n", err_msg.c_str());
-            std::fprintf(stderr, "[fpA_intB SM90] Check: compiled with sm_90a? Device is sm_%d\n",
-                tensorrt_llm::common::getSMVersion());
-            std::fprintf(stderr, "[fpA_intB SM90] Possible causes:\n");
-            std::fprintf(stderr, "  - Binary compiled without sm_90a (need -DCMAKE_CUDA_ARCHITECTURES=90a)\n");
-            std::fprintf(stderr, "  - Insufficient shared memory for this tile config\n");
-            std::fprintf(stderr, "  - CUTLASS version mismatch\n");
-
-            // Try to get more info from CUDA
-            cudaError_t cuda_err = cudaGetLastError();
-            if (cuda_err != cudaSuccess)
-            {
-                std::fprintf(stderr, "  - CUDA error: %s (%d)\n",
-                    cudaGetErrorString(cuda_err), static_cast<int>(cuda_err));
-            }
             throw std::runtime_error("[TensorRT LLM Error][fpA_intB Runner] " + err_msg);
         }
 
@@ -327,7 +276,6 @@ void sm90_generic_mixed_gemm_kernelLauncher(ActivationType const* A, WeightType 
         {
             std::string err_msg
                 = "Failed to run cutlass fpA_intB gemm. Error: " + std::string(cutlassGetStatusString(run_status));
-            std::fprintf(stderr, "[fpA_intB SM90] run FAILED: %s\n", err_msg.c_str());
             throw std::runtime_error("[TensorRT LLM Error][fpA_intB Runner] " + err_msg);
         }
     }

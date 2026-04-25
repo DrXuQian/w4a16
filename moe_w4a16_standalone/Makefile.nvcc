@@ -1,0 +1,69 @@
+THIS_DIR := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
+
+NVCC ?= nvcc
+GPU_ARCH ?= sm_90a
+BUILD_DIR ?= $(THIS_DIR)/build_nvcc
+TARGET ?= $(BUILD_DIR)/test_moe_w4a16_gemm
+
+_CUTLASS_CANDIDATES := \
+	$(THIS_DIR)/../../../third_party/cutlass \
+	$(THIS_DIR)/../3rdparty/cutlass \
+	$(HOME)/TensorRT-LLM/3rdparty/cutlass
+CUTLASS_DIR ?= $(firstword $(foreach d,$(_CUTLASS_CANDIDATES),$(if $(wildcard $(d)/include/cutlass/cutlass.h),$(d))))
+ifeq ($(strip $(CUTLASS_DIR)),)
+CUTLASS_DIR := $(THIS_DIR)/../../../third_party/cutlass
+endif
+
+OPT ?= -O3
+STD ?= -std=c++17
+EXTRA_NVCCFLAGS ?=
+LDLIBS ?= -lcudart
+
+INCLUDE_DIRS := \
+	$(THIS_DIR)/cpp/include \
+	$(THIS_DIR)/cpp \
+	$(THIS_DIR)/cpp/tensorrt_llm \
+	$(THIS_DIR)/cpp/tensorrt_llm/cutlass_extensions/include \
+	$(CUTLASS_DIR)/include
+
+DEFS := -DENABLE_BF16
+
+ifneq (,$(findstring sm_90,$(GPU_ARCH)))
+DEFS += -DCUTLASS_ARCH_MMA_SM90_SUPPORTED=1
+endif
+
+NVCCFLAGS := $(OPT) $(STD) -arch=$(GPU_ARCH) --expt-relaxed-constexpr $(EXTRA_NVCCFLAGS)
+INCLUDES := $(addprefix -I,$(INCLUDE_DIRS))
+
+SOURCES := \
+	$(THIS_DIR)/cpp/tensorrt_llm/kernels/cutlass_kernels/cutlass_heuristic.cpp \
+	$(THIS_DIR)/cpp/tensorrt_llm/kernels/cutlass_kernels/moe_gemm/moe_gemm_kernels_fp16_uint4.cu \
+	$(THIS_DIR)/cpp/tensorrt_llm/kernels/cutlass_kernels/moe_gemm/moe_gemm_kernels_bf16_uint4.cu \
+	$(THIS_DIR)/test/test_moe_w4a16_gemm.cu
+
+.PHONY: all clean check-cutlass print
+
+all: $(TARGET)
+
+check-cutlass:
+	@test -f "$(CUTLASS_DIR)/include/cutlass/cutlass.h" || { \
+		echo "CUTLASS not found at CUTLASS_DIR=$(CUTLASS_DIR)"; \
+		echo "Pass CUTLASS_DIR=/path/to/cutlass"; \
+		exit 1; \
+	}
+
+$(TARGET): check-cutlass $(SOURCES)
+	@mkdir -p "$(BUILD_DIR)"
+	$(NVCC) $(NVCCFLAGS) $(DEFS) $(INCLUDES) $(SOURCES) -o "$@" $(LDLIBS)
+
+print:
+	@printf 'NVCC=%s\n' '$(NVCC)'
+	@printf 'GPU_ARCH=%s\n' '$(GPU_ARCH)'
+	@printf 'CUTLASS_DIR=%s\n' '$(CUTLASS_DIR)'
+	@printf 'BUILD_DIR=%s\n' '$(BUILD_DIR)'
+	@printf 'TARGET=%s\n' '$(TARGET)'
+	@printf 'NVCCFLAGS=%s\n' '$(NVCCFLAGS)'
+	@printf 'DEFS=%s\n' '$(DEFS)'
+
+clean:
+	$(RM) -r "$(BUILD_DIR)"
