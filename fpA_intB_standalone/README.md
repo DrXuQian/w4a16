@@ -58,8 +58,10 @@ make -f fpA_intB_standalone/Makefile.nvcc \
 The output binary is `fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm`.
 Use `GPU_ARCH=sm_80` for an Ampere build.
 
-If `nvcc` is a Clang/PPU wrapper and fails with an `fpclassify` host/device
-constexpr overload error, enable the Clang CUDA compatibility flag:
+The Makefile probes whether the CUDA compiler accepts Clang's
+`-fno-cuda-host-device-constexpr` option and enables it automatically when
+available. If a Clang/PPU wrapper still fails with an `fpclassify` host/device
+constexpr overload error, force the compatibility flag:
 
 ```
 make -f fpA_intB_standalone/Makefile.nvcc \
@@ -67,6 +69,9 @@ make -f fpA_intB_standalone/Makefile.nvcc \
   CUTLASS_DIR=$PWD/../../third_party/cutlass \
   CLANG_CUDA_COMPAT=1
 ```
+
+If you need to mirror CMake's CUDA driver behavior more closely, add
+`NVCC_FORWARD_UNKNOWN=1`.
 
 Run
 ---

@@ -22,13 +22,25 @@ STD ?= -std=c++17
 EXTRA_NVCCFLAGS ?=
 EXTRA_CXXFLAGS ?=
 LDLIBS ?= -lcudart
+NVCC_FORWARD_UNKNOWN ?= 0
 
-NVCC_VERSION_TEXT := $(shell $(NVCC) --version 2>&1 | tr '[:upper:]' '[:lower:]')
-NVCC_IS_CLANG := $(if $(findstring clang,$(NVCC_VERSION_TEXT)),1,0)
-CLANG_CUDA_COMPAT ?= $(NVCC_IS_CLANG)
 CLANG_CUDA_FLAGS ?= -fno-cuda-host-device-constexpr
+NVCC_ACCEPTS_CLANG_CUDA_FLAGS = $(shell \
+	tmp=$$(mktemp /tmp/fpa_nvcc_probe_XXXXXX.cu); \
+	obj=$$tmp.o; \
+	printf '__global__ void f(){} int main(){return 0;}\n' > $$tmp; \
+	if $(NVCC) $(STD) -arch=$(GPU_ARCH) $(CLANG_CUDA_FLAGS) -c $$tmp -o $$obj >/dev/null 2>&1; then \
+		printf 1; \
+	else \
+		printf 0; \
+	fi; \
+	rm -f $$tmp $$obj)
+CLANG_CUDA_COMPAT ?= $(NVCC_ACCEPTS_CLANG_CUDA_FLAGS)
 ifeq ($(CLANG_CUDA_COMPAT),1)
 EXTRA_NVCCFLAGS += $(CLANG_CUDA_FLAGS)
+endif
+ifeq ($(NVCC_FORWARD_UNKNOWN),1)
+EXTRA_NVCCFLAGS += -forward-unknown-to-host-compiler
 endif
 
 INCLUDE_DIRS := \
@@ -94,6 +106,7 @@ print:
 	@printf 'BUILD_DIR=%s\n' '$(BUILD_DIR)'
 	@printf 'TARGET=%s\n' '$(TARGET)'
 	@printf 'CLANG_CUDA_COMPAT=%s\n' '$(CLANG_CUDA_COMPAT)'
+	@printf 'NVCC_FORWARD_UNKNOWN=%s\n' '$(NVCC_FORWARD_UNKNOWN)'
 	@printf 'NVCCFLAGS=%s\n' '$(NVCCFLAGS)'
 	@printf 'CXXFLAGS=%s\n' '$(CXXFLAGS)'
 	@printf 'DEFS=%s\n' '$(DEFS)'

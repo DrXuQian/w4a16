@@ -27,7 +27,8 @@ make -f moe_w4a16_standalone/Makefile.nvcc \
 ```
 
 If `fpA_intB` is built with a Clang/PPU `nvcc` wrapper and hits an
-`fpclassify` host/device constexpr overload error, add
+`fpclassify` host/device constexpr overload error, the Makefile should enable
+the compatibility flag automatically. If it does not, add
 `CLANG_CUDA_COMPAT=1` to the `fpA_intB` make command.
 
 ## Usage
