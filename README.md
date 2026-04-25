@@ -26,6 +26,10 @@ make -f moe_w4a16_standalone/Makefile.nvcc \
   CUTLASS_DIR=$PWD/../../third_party/cutlass
 ```
 
+If `fpA_intB` is built with a Clang/PPU `nvcc` wrapper and hits an
+`fpclassify` host/device constexpr overload error, add
+`CLANG_CUDA_COMPAT=1` to the `fpA_intB` make command.
+
 ## Usage
 
 ```bash

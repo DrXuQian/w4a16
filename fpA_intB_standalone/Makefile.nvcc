@@ -23,6 +23,14 @@ EXTRA_NVCCFLAGS ?=
 EXTRA_CXXFLAGS ?=
 LDLIBS ?= -lcudart
 
+NVCC_VERSION_TEXT := $(shell $(NVCC) --version 2>&1 | tr '[:upper:]' '[:lower:]')
+NVCC_IS_CLANG := $(if $(findstring clang,$(NVCC_VERSION_TEXT)),1,0)
+CLANG_CUDA_COMPAT ?= $(NVCC_IS_CLANG)
+CLANG_CUDA_FLAGS ?= -fno-cuda-host-device-constexpr
+ifeq ($(CLANG_CUDA_COMPAT),1)
+EXTRA_NVCCFLAGS += $(CLANG_CUDA_FLAGS)
+endif
+
 INCLUDE_DIRS := \
 	$(THIS_DIR)/cpp/include \
 	$(THIS_DIR)/cpp \
@@ -85,6 +93,7 @@ print:
 	@printf 'CUDA_HOME=%s\n' '$(CUDA_HOME)'
 	@printf 'BUILD_DIR=%s\n' '$(BUILD_DIR)'
 	@printf 'TARGET=%s\n' '$(TARGET)'
+	@printf 'CLANG_CUDA_COMPAT=%s\n' '$(CLANG_CUDA_COMPAT)'
 	@printf 'NVCCFLAGS=%s\n' '$(NVCCFLAGS)'
 	@printf 'CXXFLAGS=%s\n' '$(CXXFLAGS)'
 	@printf 'DEFS=%s\n' '$(DEFS)'
