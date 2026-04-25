@@ -48,8 +48,6 @@
 #include "tensorrt_llm/kernels/cutlass_kernels/cutlass_type_conversion.h"
 #include "tensorrt_llm/kernels/cutlass_kernels/fpA_intB_gemm/launchers/fpA_intB_launcher_sm90.h"
 
-#include <typeinfo>
-
 TRTLLM_NAMESPACE_BEGIN
 
 namespace kernels
@@ -61,245 +59,6 @@ namespace tk = tensorrt_llm::common;
 namespace tkc = tensorrt_llm::cutlass_extensions;
 
 using namespace cute;
-
-#define FPA_INTB_STRINGIZE_DETAIL(x) #x
-#define FPA_INTB_STRINGIZE(x) FPA_INTB_STRINGIZE_DETAIL(x)
-
-namespace
-{
-
-inline void fpAIntBSm90PrintCompileInfo()
-{
-#if defined(__CUDACC_VER_MAJOR__)
-    std::fprintf(stderr, "[fpA_intB SM90 diag] nvcc=%d.%d.%d\n", __CUDACC_VER_MAJOR__,
-#if defined(__CUDACC_VER_MINOR__)
-        __CUDACC_VER_MINOR__,
-#else
-        0,
-#endif
-#if defined(__CUDACC_VER_BUILD__)
-        __CUDACC_VER_BUILD__
-#else
-        0
-#endif
-    );
-#else
-    std::fprintf(stderr, "[fpA_intB SM90 diag] nvcc=<not reported>\n");
-#endif
-
-#if defined(__CUDA_ARCH_LIST__)
-    std::fprintf(stderr, "[fpA_intB SM90 diag] __CUDA_ARCH_LIST__=%s\n", FPA_INTB_STRINGIZE(__CUDA_ARCH_LIST__));
-#else
-    std::fprintf(stderr, "[fpA_intB SM90 diag] __CUDA_ARCH_LIST__=<not defined>\n");
-#endif
-
-#if defined(COMPILE_HOPPER_TMA_GEMMS)
-    std::fprintf(stderr, "[fpA_intB SM90 diag] COMPILE_HOPPER_TMA_GEMMS=1\n");
-#else
-    std::fprintf(stderr, "[fpA_intB SM90 diag] COMPILE_HOPPER_TMA_GEMMS=0\n");
-#endif
-}
-
-inline void fpAIntBSm90PrintDeviceInfo()
-{
-    int runtime_version = 0;
-    int driver_version = 0;
-    cudaRuntimeGetVersion(&runtime_version);
-    cudaDriverGetVersion(&driver_version);
-    std::fprintf(stderr, "[fpA_intB SM90 diag] cuda runtime=%d driver=%d\n", runtime_version, driver_version);
-
-    int device = -1;
-    cudaError_t device_err = cudaGetDevice(&device);
-    if (device_err != cudaSuccess)
-    {
-        std::fprintf(stderr, "[fpA_intB SM90 diag] cudaGetDevice FAILED: %s (%d)\n", cudaGetErrorString(device_err),
-            static_cast<int>(device_err));
-        return;
-    }
-
-    cudaDeviceProp prop{};
-    cudaError_t prop_err = cudaGetDeviceProperties(&prop, device);
-    if (prop_err != cudaSuccess)
-    {
-        std::fprintf(stderr, "[fpA_intB SM90 diag] cudaGetDeviceProperties FAILED: %s (%d)\n",
-            cudaGetErrorString(prop_err), static_cast<int>(prop_err));
-        return;
-    }
-
-    int optin_smem = 0;
-    int block_smem = 0;
-    int smem_per_sm = 0;
-    int max_blocks_per_sm = 0;
-    cudaDeviceGetAttribute(&optin_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
-    cudaDeviceGetAttribute(&block_smem, cudaDevAttrMaxSharedMemoryPerBlock, device);
-    cudaDeviceGetAttribute(&smem_per_sm, cudaDevAttrMaxSharedMemoryPerMultiprocessor, device);
-    cudaDeviceGetAttribute(&max_blocks_per_sm, cudaDevAttrMaxBlocksPerMultiprocessor, device);
-
-    std::fprintf(stderr,
-        "[fpA_intB SM90 diag] device=%d name=\"%s\" cc=%d.%d sms=%d max_threads_per_block=%d\n", device,
-        prop.name, prop.major, prop.minor, prop.multiProcessorCount, prop.maxThreadsPerBlock);
-    std::fprintf(stderr,
-        "[fpA_intB SM90 diag] device_smem: per_block=%d optin_per_block=%d per_sm=%d max_blocks_per_sm=%d\n",
-        block_smem, optin_smem, smem_per_sm, max_blocks_per_sm);
-}
-
-template <typename GemmKernel>
-bool fpAIntBSm90DiagnoseKernel(char const* where, int m, int n, int k, int group_size, size_t workspace_needed,
-    size_t workspace_bytes, void* workspace, dim3 grid, dim3 block)
-{
-    auto kernel = cutlass::device_kernel<GemmKernel>;
-    auto kernel_ptr = reinterpret_cast<void const*>(kernel);
-    int const requested_smem = static_cast<int>(sizeof(typename GemmKernel::SharedStorage));
-    int device = -1;
-    int optin_smem = 0;
-    if (cudaGetDevice(&device) == cudaSuccess)
-    {
-        cudaDeviceGetAttribute(&optin_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
-    }
-
-    std::fprintf(stderr, "[fpA_intB SM90 diag] ===== %s =====\n", where);
-    fpAIntBSm90PrintCompileInfo();
-    fpAIntBSm90PrintDeviceInfo();
-    std::fprintf(stderr,
-        "[fpA_intB SM90 diag] problem: m=%d n=%d k=%d group=%d workspace_needed=%zu workspace_provided=%zu "
-        "workspace=%p\n",
-        m, n, k, group_size, workspace_needed, workspace_bytes, workspace);
-    std::fprintf(stderr,
-        "[fpA_intB SM90 diag] launch_shape: grid=(%u,%u,%u) block=(%u,%u,%u) kernel_ptr=%p\n", grid.x, grid.y,
-        grid.z, block.x, block.y, block.z, kernel_ptr);
-    std::fprintf(stderr,
-        "[fpA_intB SM90 diag] kernel_traits: shared_storage=%d max_threads=%d load_wg=%d mma_wg=%d type=%s\n",
-        requested_smem, GemmKernel::MaxThreadsPerBlock, GemmKernel::NumLoadWarpGroups, GemmKernel::NumMmaWarpGroups,
-        typeid(GemmKernel).name());
-
-    cudaFuncAttributes attr{};
-    cudaError_t get_attr = cudaFuncGetAttributes(&attr, kernel);
-    std::fprintf(stderr, "[fpA_intB SM90 diag] cudaFuncGetAttributes: %s (%d)\n", cudaGetErrorString(get_attr),
-        static_cast<int>(get_attr));
-    if (get_attr == cudaSuccess)
-    {
-        std::fprintf(stderr,
-            "[fpA_intB SM90 diag] func_attr: binary=%d ptx=%d static_smem=%zu max_dyn_smem=%d const=%zu local=%zu "
-            "regs=%d max_threads=%d cacheModeCA=%d preferred_carveout=%d\n",
-            attr.binaryVersion, attr.ptxVersion, static_cast<size_t>(attr.sharedSizeBytes),
-            attr.maxDynamicSharedSizeBytes, static_cast<size_t>(attr.constSizeBytes),
-            static_cast<size_t>(attr.localSizeBytes), attr.numRegs, attr.maxThreadsPerBlock, attr.cacheModeCA,
-            attr.preferredShmemCarveout);
-    }
-
-    cudaError_t carveout_err = cudaFuncSetAttribute(
-        kernel, cudaFuncAttributePreferredSharedMemoryCarveout, cudaSharedmemCarveoutMaxShared);
-    std::fprintf(stderr, "[fpA_intB SM90 diag] cudaFuncSetAttribute carveout=max_shared: %s (%d)\n",
-        cudaGetErrorString(carveout_err), static_cast<int>(carveout_err));
-
-    cudaError_t set_smem = cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, requested_smem);
-    std::fprintf(stderr, "[fpA_intB SM90 diag] cudaFuncSetAttribute max_dynamic_smem=%d: %s (%d)\n",
-        requested_smem, cudaGetErrorString(set_smem), static_cast<int>(set_smem));
-
-    int active_blocks_zero_smem = -1;
-    cudaError_t occ_zero = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-        &active_blocks_zero_smem, kernel, GemmKernel::MaxThreadsPerBlock, 0);
-    std::fprintf(stderr, "[fpA_intB SM90 diag] occupancy smem=0: %s (%d), active_blocks=%d\n",
-        cudaGetErrorString(occ_zero), static_cast<int>(occ_zero), active_blocks_zero_smem);
-
-    int active_blocks_requested_smem = -1;
-    cudaError_t occ_requested = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-        &active_blocks_requested_smem, kernel, GemmKernel::MaxThreadsPerBlock, requested_smem);
-    std::fprintf(stderr, "[fpA_intB SM90 diag] occupancy smem=%d: %s (%d), active_blocks=%d\n", requested_smem,
-        cudaGetErrorString(occ_requested), static_cast<int>(occ_requested), active_blocks_requested_smem);
-
-    if (get_attr != cudaSuccess)
-    {
-        std::fprintf(stderr,
-            "[fpA_intB SM90 diag] diagnosis: kernel function is not loadable/registered in this binary.\n");
-    }
-    else if (requested_smem > attr.maxDynamicSharedSizeBytes)
-    {
-        std::fprintf(stderr,
-            "[fpA_intB SM90 diag] diagnosis: requested dynamic smem exceeds this kernel's maxDynamicSharedSizeBytes.\n");
-    }
-    else if (optin_smem > 0 && requested_smem + static_cast<int>(attr.sharedSizeBytes) > optin_smem)
-    {
-        std::fprintf(stderr,
-            "[fpA_intB SM90 diag] diagnosis: requested dynamic smem plus static smem exceeds device opt-in limit.\n");
-    }
-    else if (set_smem != cudaSuccess)
-    {
-        std::fprintf(stderr,
-            "[fpA_intB SM90 diag] diagnosis: cuda rejected a valid-looking smem opt-in for this concrete CUTLASS "
-            "kernel; suspect device image metadata or runtime/toolchain handling.\n");
-    }
-    else
-    {
-        std::fprintf(stderr,
-            "[fpA_intB SM90 diag] diagnosis: kernel attributes and smem opt-in look valid before CUTLASS initialize.\n");
-    }
-
-    if (get_attr != cudaSuccess || carveout_err != cudaSuccess || set_smem != cudaSuccess || occ_zero != cudaSuccess
-        || occ_requested != cudaSuccess)
-    {
-        cudaError_t cleared = cudaGetLastError();
-        std::fprintf(stderr, "[fpA_intB SM90 diag] cudaGetLastError(clear): %s (%d)\n", cudaGetErrorString(cleared),
-            static_cast<int>(cleared));
-    }
-
-    std::fprintf(stderr, "[fpA_intB SM90 diag] ===== end %s =====\n", where);
-    return set_smem == cudaSuccess;
-}
-
-template <typename GemmKernel, typename Arguments>
-void fpAIntBSm90DiagnoseInitializeSteps(Arguments const& args, void* workspace, cudaStream_t stream)
-{
-    std::fprintf(stderr, "[fpA_intB SM90 diag] ----- initialize step replay -----\n");
-
-    cutlass::Status workspace_status = GemmKernel::initialize_workspace(args, workspace, stream, nullptr);
-    std::fprintf(stderr, "[fpA_intB SM90 diag] init_step initialize_workspace: %s\n",
-        cutlassGetStatusString(workspace_status));
-    cudaError_t workspace_cuda_err = cudaGetLastError();
-    std::fprintf(stderr, "[fpA_intB SM90 diag] init_step initialize_workspace cudaGetLastError: %s (%d)\n",
-        cudaGetErrorString(workspace_cuda_err), static_cast<int>(workspace_cuda_err));
-
-    if (workspace_status != cutlass::Status::kSuccess)
-    {
-        std::fprintf(stderr,
-            "[fpA_intB SM90 diag] init_step diagnosis: initialize_workspace failed before kernel attribute setup.\n");
-        std::fprintf(stderr, "[fpA_intB SM90 diag] ----- end initialize step replay -----\n");
-        return;
-    }
-
-    auto params = GemmKernel::to_underlying_arguments(args, workspace);
-    dim3 const params_grid = GemmKernel::get_grid_shape(params);
-    dim3 const params_block = GemmKernel::get_block_shape();
-    std::fprintf(stderr,
-        "[fpA_intB SM90 diag] init_step to_underlying_arguments: OK, grid=(%u,%u,%u) block=(%u,%u,%u)\n",
-        params_grid.x, params_grid.y, params_grid.z, params_block.x, params_block.y, params_block.z);
-
-    int const smem_size = static_cast<int>(sizeof(typename GemmKernel::SharedStorage));
-    cudaError_t set_smem = cudaFuncSetAttribute(
-        cutlass::device_kernel<GemmKernel>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
-    std::fprintf(stderr, "[fpA_intB SM90 diag] init_step cudaFuncSetAttribute max_dynamic_smem=%d: %s (%d)\n",
-        smem_size, cudaGetErrorString(set_smem), static_cast<int>(set_smem));
-    cudaError_t set_smem_last = cudaGetLastError();
-    std::fprintf(stderr, "[fpA_intB SM90 diag] init_step cudaFuncSetAttribute cudaGetLastError: %s (%d)\n",
-        cudaGetErrorString(set_smem_last), static_cast<int>(set_smem_last));
-
-    if (set_smem != cudaSuccess)
-    {
-        std::fprintf(stderr,
-            "[fpA_intB SM90 diag] init_step diagnosis: CUTLASS initialize fails at dynamic shared-memory attribute "
-            "setup.\n");
-    }
-    else
-    {
-        std::fprintf(stderr,
-            "[fpA_intB SM90 diag] init_step diagnosis: replayed initialize steps succeeded; original failure is not "
-            "from initialize_workspace or smem attribute setup.\n");
-    }
-
-    std::fprintf(stderr, "[fpA_intB SM90 diag] ----- end initialize step replay -----\n");
-}
-
-} // namespace
 
 template <typename ActivationType, typename WeightType, typename ScaleZeroType, typename BiasType, typename OutputType,
     cutlass::WeightOnlyQuantOp QuantOp, typename EpilogueTag, typename CTAShape, typename ClusterShape,
@@ -491,14 +250,28 @@ void sm90_generic_mixed_gemm_kernelLauncher(ActivationType const* A, WeightType 
 
         Gemm gemm;
 
-        size_t const needed_ws = gemm.get_workspace_size(args);
-        dim3 const diag_grid = Gemm::get_grid_shape(args, workspace);
-        dim3 const diag_block = GemmKernel::get_block_shape();
+        // Diagnostic: print kernel shared memory requirement
+        {
+            int smem_size = static_cast<int>(sizeof(typename Gemm::GemmKernel::SharedStorage));
+            int device = 0;
+            cudaGetDevice(&device);
+            int max_smem = 0;
+            cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+            std::fprintf(stderr, "[fpA_intB SM90 diag] kernel shared_storage=%d bytes, device max=%d bytes %s\n",
+                smem_size, max_smem, smem_size > max_smem ? "*** EXCEEDS LIMIT ***" : "(OK)");
 
-        bool const smem_attr_ok = fpAIntBSm90DiagnoseKernel<GemmKernel>(
-            "before initialize", m, n, k, group_size, needed_ws, workspace_bytes, workspace, diag_grid, diag_block);
+            // Try setting shared memory attribute directly
+            auto attr_err = cudaFuncSetAttribute(
+                cutlass::device_kernel<typename Gemm::GemmKernel>,
+                cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+            if (attr_err != cudaSuccess)
+            {
+                std::fprintf(stderr, "[fpA_intB SM90 diag] cudaFuncSetAttribute FAILED: %s (%d)\n",
+                    cudaGetErrorString(attr_err), static_cast<int>(attr_err));
+            }
+        }
 
-        if (needed_ws > workspace_bytes)
+        if (gemm.get_workspace_size(args) > workspace_bytes)
         {
             TLLM_LOG_ERROR("[TensorRT LLM Error][fpA_intB Runner] given workspace size insufficient.");
         }
@@ -509,9 +282,21 @@ void sm90_generic_mixed_gemm_kernelLauncher(ActivationType const* A, WeightType 
             std::string err_msg = "fpA_intB cutlass kernel will fail for params. Error: "
                 + std::string(cutlassGetStatusString(can_implement));
             std::fprintf(stderr, "[fpA_intB SM90] can_implement FAILED: %s\n", err_msg.c_str());
-            std::fprintf(stderr, "[fpA_intB SM90] workspace=%p workspace_size=%zu needed=%zu\n",
-                workspace, workspace_bytes, needed_ws);
+            std::fprintf(stderr, "[fpA_intB SM90] workspace=%p workspace_size=%zu\n",
+                workspace, workspace ? 0UL : 0UL);
             throw std::runtime_error("[TensorRT LLM Error][fpA_intB Runner] " + err_msg);
+        }
+
+        // Debug: print workspace and shared memory info before initialize
+        {
+            size_t needed_ws = gemm.get_workspace_size(args);
+            int device = 0;
+            cudaGetDevice(&device);
+            int max_smem = 0;
+            cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+            std::fprintf(stderr, "[fpA_intB SM90] workspace: needed=%zu provided=%zu\n",
+                needed_ws, workspace_bytes);
+            std::fprintf(stderr, "[fpA_intB SM90] device max_shared_mem_per_block=%d bytes\n", max_smem);
         }
 
         auto init_status = gemm.initialize(args, workspace, stream);
@@ -520,13 +305,12 @@ void sm90_generic_mixed_gemm_kernelLauncher(ActivationType const* A, WeightType 
             std::string err_msg = "Failed to initialize cutlass fpA_intB gemm. Error: "
                 + std::string(cutlassGetStatusString(init_status));
             std::fprintf(stderr, "[fpA_intB SM90] initialize FAILED: %s\n", err_msg.c_str());
-            fpAIntBSm90DiagnoseInitializeSteps<GemmKernel>(args, workspace, stream);
-            if (smem_attr_ok)
-            {
-                fpAIntBSm90DiagnoseKernel<GemmKernel>(
-                    "after initialize failure", m, n, k, group_size, needed_ws, workspace_bytes, workspace, diag_grid,
-                    diag_block);
-            }
+            std::fprintf(stderr, "[fpA_intB SM90] Check: compiled with sm_90a? Device is sm_%d\n",
+                tensorrt_llm::common::getSMVersion());
+            std::fprintf(stderr, "[fpA_intB SM90] Possible causes:\n");
+            std::fprintf(stderr, "  - Binary compiled without sm_90a (need -DCMAKE_CUDA_ARCHITECTURES=90a)\n");
+            std::fprintf(stderr, "  - Insufficient shared memory for this tile config\n");
+            std::fprintf(stderr, "  - CUTLASS version mismatch\n");
 
             // Try to get more info from CUDA
             cudaError_t cuda_err = cudaGetLastError();
