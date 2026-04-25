@@ -2,8 +2,8 @@
  * Minimal SM90 fpA_intB CUTLASS kernel-attribute repro.
  *
  * This intentionally does not link libfpA_intB_gemm and does not run the test
- * harness. It instantiates one concrete Hopper TMA fp16 x int4 GEMM kernel and
- * calls the same runtime API that CUTLASS initialize() uses:
+ * harness. It instantiates one concrete Hopper TMA fp16 x int4 GEMM kernel
+ * and calls the same runtime API that CUTLASS initialize() uses:
  *
  *   cudaFuncSetAttribute(cutlass::device_kernel<GemmKernel>,
  *       cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size)
@@ -87,12 +87,27 @@ using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBui
 using PackedScaleZero = cute::tuple<CutlassWeightType, ElementScale, ElementZero>;
 using ElementBCollectiveInfo = PackedScaleZero;
 
-using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilderInterleaved<ArchTag, OperatorClass,
+using CollectiveMainloopInterleaved = typename cutlass::gemm::collective::CollectiveBuilderInterleaved<ArchTag, OperatorClass,
     ElementBCollectiveInfo, LayoutB_Transpose, AlignmentB, CutlassActivationType, LayoutA_Transpose, AlignmentA,
     ElementAccumulator, TileShape, ClusterShape,
     cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
         sizeof(typename CollectiveEpilogue::SharedStorage))>,
     KernelSchedule>::CollectiveOp;
+
+using CollectiveMainloopUpstream = typename cutlass::gemm::collective::CollectiveBuilder<ArchTag, OperatorClass,
+    ElementBCollectiveInfo, LayoutB_Transpose, AlignmentB, CutlassActivationType, LayoutA_Transpose, AlignmentA,
+    ElementAccumulator, TileShape, ClusterShape,
+    cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
+        sizeof(typename CollectiveEpilogue::SharedStorage))>,
+    KernelSchedule>::CollectiveOp;
+
+#if defined(FPA_INTB_REPRO_USE_UPSTREAM_BUILDER)
+using CollectiveMainloop = CollectiveMainloopUpstream;
+char const* const kBuilderName = "upstream_cutlass_collective_builder";
+#else
+using CollectiveMainloop = CollectiveMainloopInterleaved;
+char const* const kBuilderName = "trtllm_collective_builder_interleaved";
+#endif
 
 using TileScheduler = cutlass::gemm::StreamKScheduler;
 
@@ -176,7 +191,8 @@ int main(int argc, char** argv)
     int const computed_smem = static_cast<int>(sizeof(typename GemmKernel::SharedStorage));
     int const requested_smem = parse_smem_arg(argc, argv, computed_smem);
 
-    std::printf("kernel: tile=128x256x64 cluster=2x1x1 mainloop=cooperative epilogue=cooperative\n");
+    std::printf("kernel: builder=%s tile=128x256x64 cluster=2x1x1 mainloop=cooperative epilogue=cooperative\n",
+        kBuilderName);
     std::printf("kernel_traits: shared_storage=%d requested_smem=%d max_threads=%d load_wg=%d mma_wg=%d\n",
         computed_smem, requested_smem, GemmKernel::MaxThreadsPerBlock, GemmKernel::NumLoadWarpGroups,
         GemmKernel::NumMmaWarpGroups);
