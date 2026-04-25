@@ -98,19 +98,3 @@ set_property(TARGET test_sm90_gemm_init PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
 target_link_libraries(test_sm90_gemm_init fpA_intB_gemm CUDA::cudart)
 target_compile_definitions(test_sm90_gemm_init PRIVATE ${FPA_INTB_COMPILE_DEFS})
 target_compile_options(test_sm90_gemm_init PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
-
-# Minimal one-kernel repro for SM90 CUTLASS function-attribute failures.
-add_executable(test_sm90_kernel_attr_repro test/test_sm90_kernel_attr_repro.cu)
-set_property(TARGET test_sm90_kernel_attr_repro PROPERTY CUDA_ARCHITECTURES OFF)
-target_include_directories(test_sm90_kernel_attr_repro PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/cpp/tensorrt_llm
-    ${CMAKE_CURRENT_SOURCE_DIR}/cpp/tensorrt_llm/cutlass_extensions/include
-    ${CUTLASS_DIR}/include
-)
-target_compile_definitions(test_sm90_kernel_attr_repro PRIVATE ${FPA_INTB_COMPILE_DEFS})
-target_compile_options(test_sm90_kernel_attr_repro PRIVATE
-    $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
-)
-target_link_libraries(test_sm90_kernel_attr_repro CUDA::cudart)
