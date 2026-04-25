@@ -80,7 +80,7 @@ make -f moe_w4a16_standalone/Makefile.nvcc \
 The output binary is `moe_w4a16_standalone/build_nvcc/test_moe_w4a16_gemm`.
 Use `GPU_ARCH=sm_80` for an Ampere build. The MoE W4A16 extraction uses the
 SM80 grouped GEMM fallback on Hopper, so `sm_90` is sufficient and keeps the
-nvcc compile memory close to the original CMake build.
+nvcc compile memory low.
 
 Run
 ---

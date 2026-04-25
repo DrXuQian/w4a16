@@ -47,8 +47,7 @@ Input/weight layout assumptions
 
 Build
 -----
-From the repo root, use the direct `nvcc` Makefile. This avoids CMake CUDA
-architecture rewriting and does not build an intermediate static library.
+From the repo root, use the direct `nvcc` Makefile as the default build path.
 
 ```
 make -f fpA_intB_standalone/Makefile.nvcc \
@@ -110,7 +109,7 @@ Example: `tile_enum=11 stages=3 split_k=7` corresponds to:
 - so the CLI form is:
 
 ```
-fpA_intB_standalone/build_sm80/test_fpA_intB_gemm \
+fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm \
   --m=1 --n=2048 --k=3584 --group_size=128 \
   --config=128x128x64x3x7
 ```
@@ -131,7 +130,7 @@ Note: `--ncu` requires `--config=...` to avoid profiling-style config search.
 Example:
 
 ```
-fpA_intB_standalone/build_sm80/test_fpA_intB_gemm \
+fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm \
   --m=1 --n=2048 --k=2048 --group_size=128 \
   --ncu --config=cuda --iters=2000
 ```
@@ -142,7 +141,7 @@ Set `FPA_INTB_PROFILE_LOG=1` to print each candidate config, its timing, and fai
 
 ```
 FPA_INTB_PROFILE_LOG=1 \
-fpA_intB_standalone/build_sm80/test_fpA_intB_gemm \
+fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm \
   --m=1 --n=4096 --k=4096 --group_size=128
 ```
 
@@ -152,7 +151,7 @@ Use the helper script to run every candidate configuration directly:
 
 ```
 fpA_intB_standalone/scripts/run_all_configs.sh \
-  --bin fpA_intB_standalone/build_sm80/test_fpA_intB_gemm \
+  --bin fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm \
   --m 1 --n 4096 --k 4096 --group 128 --warmup 10 --iters 100 --out results.txt
 ```
 
@@ -160,14 +159,14 @@ Skip the CUDA fallback:
 
 ```
 fpA_intB_standalone/scripts/run_all_configs.sh \
-  --bin fpA_intB_standalone/build_sm80/test_fpA_intB_gemm \
+  --bin fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm \
   --m 1 --n 4096 --k 4096 --group 128 --warmup 10 --iters 100 --skip-cuda
 ```
 
 CPU reference (small shapes only):
 
 ```
-fpA_intB_standalone/build_sm80/test_fpA_intB_gemm \
+fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm \
   --m=1 --n=128 --k=128 --group_size=128 --verify
 ```
 
