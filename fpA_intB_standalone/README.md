@@ -53,7 +53,7 @@ architecture rewriting and does not build an intermediate static library.
 ```
 make -f fpA_intB_standalone/Makefile.nvcc \
   GPU_ARCH=sm_90a \
-  CUTLASS_DIR=$HOME/TensorRT-LLM/3rdparty/cutlass
+  CUTLASS_DIR=$PWD/../../third_party/cutlass
 ```
 
 The output binary is `fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm`.

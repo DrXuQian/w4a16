@@ -7,6 +7,7 @@ TARGET ?= $(BUILD_DIR)/test_moe_w4a16_gemm
 
 _CUTLASS_CANDIDATES := \
 	$(THIS_DIR)/../../../third_party/cutlass \
+	$(THIS_DIR)/../../../thirdparty/cutlass \
 	$(THIS_DIR)/../3rdparty/cutlass \
 	$(HOME)/TensorRT-LLM/3rdparty/cutlass
 CUTLASS_DIR ?= $(firstword $(foreach d,$(_CUTLASS_CANDIDATES),$(if $(wildcard $(d)/include/cutlass/cutlass.h),$(d))))

@@ -74,7 +74,7 @@ binary itself is compiled with the requested `-arch`.
 ```
 make -f moe_w4a16_standalone/Makefile.nvcc \
   GPU_ARCH=sm_90a \
-  CUTLASS_DIR=$HOME/TensorRT-LLM/3rdparty/cutlass
+  CUTLASS_DIR=$PWD/../../third_party/cutlass
 ```
 
 The output binary is `moe_w4a16_standalone/build_nvcc/test_moe_w4a16_gemm`.
