@@ -10,11 +10,12 @@ set(CMAKE_CUDA_STANDARD 17)
 # in CMake < 3.28.
 set(GPU_ARCH "sm_80" CACHE STRING "CUDA architecture (e.g. sm_80, sm_90a)")
 set(CMAKE_CUDA_ARCHITECTURES OFF CACHE STRING "Disable CMake CUDA arch flags for raw -arch builds" FORCE)
-if(CMAKE_CUDA_FLAGS MATCHES "(^| )-arch=sm_[0-9]+a?($| )")
-    message(STATUS "Using existing raw CUDA arch flag from CMAKE_CUDA_FLAGS")
-else()
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -arch=${GPU_ARCH}")
-endif()
+set(_FPA_INTB_CUDA_FLAGS " ${CMAKE_CUDA_FLAGS} ")
+string(REGEX REPLACE " +(-arch=sm_[0-9]+a?|--gpu-architecture=sm_[0-9]+a?|--cuda-gpu-arch=sm_[0-9]+a?)" " "
+    _FPA_INTB_CUDA_FLAGS "${_FPA_INTB_CUDA_FLAGS}")
+string(STRIP "${_FPA_INTB_CUDA_FLAGS}" CMAKE_CUDA_FLAGS)
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -arch=${GPU_ARCH}")
+string(STRIP "${CMAKE_CUDA_FLAGS}" CMAKE_CUDA_FLAGS)
 message(STATUS "GPU_ARCH=${GPU_ARCH}; CUDA flags=${CMAKE_CUDA_FLAGS}")
 
 # Auto-detect SM90 for COMPILE_HOPPER_TMA_GEMMS
