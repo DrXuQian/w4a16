@@ -40,8 +40,8 @@ ifneq (,$(findstring sm_90,$(GPU_ARCH)))
 DEFS += -DCOMPILE_HOPPER_TMA_GEMMS=1 -DCUTLASS_ARCH_MMA_SM90_SUPPORTED=1
 endif
 
-NVCCFLAGS := $(OPT) $(STD) -arch=$(GPU_ARCH) --expt-relaxed-constexpr $(EXTRA_NVCCFLAGS)
-CXXFLAGS := $(OPT) $(STD) $(EXTRA_CXXFLAGS)
+NVCCFLAGS := $(OPT) $(STD) -DNDEBUG -arch=$(GPU_ARCH) --expt-relaxed-constexpr $(EXTRA_NVCCFLAGS)
+CXXFLAGS := $(OPT) $(STD) -DNDEBUG $(EXTRA_CXXFLAGS)
 INCLUDES := $(addprefix -I,$(INCLUDE_DIRS))
 
 SRC_REL := \
