@@ -1,9 +1,11 @@
 THIS_DIR := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 
 NVCC ?= nvcc
-GPU_ARCH ?= sm_90a
+CXX ?= c++
+GPU_ARCH ?= sm_90
 BUILD_DIR ?= $(THIS_DIR)/build_nvcc
 TARGET ?= $(BUILD_DIR)/test_moe_w4a16_gemm
+CUDA_HOME ?= /usr/local/cuda
 
 _CUTLASS_CANDIDATES := \
 	$(THIS_DIR)/../../../third_party/cutlass \
@@ -18,6 +20,7 @@ endif
 OPT ?= -O3
 STD ?= -std=c++17
 EXTRA_NVCCFLAGS ?=
+EXTRA_CXXFLAGS ?=
 LDLIBS ?= -lcudart
 
 INCLUDE_DIRS := \
@@ -25,15 +28,13 @@ INCLUDE_DIRS := \
 	$(THIS_DIR)/cpp \
 	$(THIS_DIR)/cpp/tensorrt_llm \
 	$(THIS_DIR)/cpp/tensorrt_llm/cutlass_extensions/include \
-	$(CUTLASS_DIR)/include
+	$(CUTLASS_DIR)/include \
+	$(CUDA_HOME)/include
 
 DEFS := -DENABLE_BF16
 
-ifneq (,$(findstring sm_90,$(GPU_ARCH)))
-DEFS += -DCUTLASS_ARCH_MMA_SM90_SUPPORTED=1
-endif
-
 NVCCFLAGS := $(OPT) $(STD) -arch=$(GPU_ARCH) --expt-relaxed-constexpr $(EXTRA_NVCCFLAGS)
+CXXFLAGS := $(OPT) $(STD) $(EXTRA_CXXFLAGS)
 INCLUDES := $(addprefix -I,$(INCLUDE_DIRS))
 
 SRC_REL := \
@@ -65,15 +66,18 @@ $(BUILD_DIR)/obj/%.cu.o: $(THIS_DIR)/%.cu
 
 $(BUILD_DIR)/obj/%.cpp.o: $(THIS_DIR)/%.cpp
 	@mkdir -p "$(@D)"
-	$(NVCC) $(NVCCFLAGS) $(DEFS) $(INCLUDES) -c "$<" -o "$@"
+	$(CXX) $(CXXFLAGS) $(DEFS) $(INCLUDES) -c "$<" -o "$@"
 
 print:
 	@printf 'NVCC=%s\n' '$(NVCC)'
+	@printf 'CXX=%s\n' '$(CXX)'
 	@printf 'GPU_ARCH=%s\n' '$(GPU_ARCH)'
 	@printf 'CUTLASS_DIR=%s\n' '$(CUTLASS_DIR)'
+	@printf 'CUDA_HOME=%s\n' '$(CUDA_HOME)'
 	@printf 'BUILD_DIR=%s\n' '$(BUILD_DIR)'
 	@printf 'TARGET=%s\n' '$(TARGET)'
 	@printf 'NVCCFLAGS=%s\n' '$(NVCCFLAGS)'
+	@printf 'CXXFLAGS=%s\n' '$(CXXFLAGS)'
 	@printf 'DEFS=%s\n' '$(DEFS)'
 
 clean:

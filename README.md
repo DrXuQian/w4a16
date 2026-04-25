@@ -22,7 +22,7 @@ make -f fpA_intB_standalone/Makefile.nvcc \
   CUTLASS_DIR=$PWD/../../third_party/cutlass
 
 make -f moe_w4a16_standalone/Makefile.nvcc \
-  GPU_ARCH=sm_90a \
+  GPU_ARCH=sm_90 \
   CUTLASS_DIR=$PWD/../../third_party/cutlass
 ```
 
@@ -81,5 +81,7 @@ Delete the cache file to force re-profiling (e.g. when switching GPU arch).
 ## Notes
 
 - Build directories are intentionally ignored (see `.gitignore`).
-- Each standalone defaults to `GPU_ARCH=sm_90a` in its `Makefile.nvcc`; pass
-  `GPU_ARCH=sm_80` for Ampere.
+- `fpA_intB_standalone` defaults to `GPU_ARCH=sm_90a` for Hopper TMA kernels.
+- `moe_w4a16_standalone` defaults to `GPU_ARCH=sm_90` because this extraction
+  uses the SM80 grouped GEMM fallback on Hopper.
+- Pass `GPU_ARCH=sm_80` for Ampere.

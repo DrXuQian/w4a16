@@ -73,12 +73,14 @@ binary itself is compiled with the requested `-arch`.
 
 ```
 make -f moe_w4a16_standalone/Makefile.nvcc \
-  GPU_ARCH=sm_90a \
+  GPU_ARCH=sm_90 \
   CUTLASS_DIR=$PWD/../../third_party/cutlass
 ```
 
 The output binary is `moe_w4a16_standalone/build_nvcc/test_moe_w4a16_gemm`.
-Use `GPU_ARCH=sm_80` for an Ampere build.
+Use `GPU_ARCH=sm_80` for an Ampere build. The MoE W4A16 extraction uses the
+SM80 grouped GEMM fallback on Hopper, so `sm_90` is sufficient and keeps the
+nvcc compile memory close to the original CMake build.
 
 Run
 ---
