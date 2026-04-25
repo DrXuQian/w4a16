@@ -114,21 +114,3 @@ target_compile_options(test_sm90_kernel_attr_repro PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
 )
 target_link_libraries(test_sm90_kernel_attr_repro CUDA::cudart)
-
-add_executable(test_sm90_kernel_attr_repro_upstream test/test_sm90_kernel_attr_repro.cu)
-set_property(TARGET test_sm90_kernel_attr_repro_upstream PROPERTY CUDA_ARCHITECTURES OFF)
-target_include_directories(test_sm90_kernel_attr_repro_upstream PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/cpp/tensorrt_llm
-    ${CMAKE_CURRENT_SOURCE_DIR}/cpp/tensorrt_llm/cutlass_extensions/include
-    ${CUTLASS_DIR}/include
-)
-target_compile_definitions(test_sm90_kernel_attr_repro_upstream PRIVATE
-    ${FPA_INTB_COMPILE_DEFS}
-    FPA_INTB_REPRO_USE_UPSTREAM_BUILDER=1
-)
-target_compile_options(test_sm90_kernel_attr_repro_upstream PRIVATE
-    $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
-)
-target_link_libraries(test_sm90_kernel_attr_repro_upstream CUDA::cudart)
