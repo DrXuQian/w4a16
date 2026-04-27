@@ -106,6 +106,59 @@ machete_standalone/scripts/run_all_schedules.sh \
   --warmup 100 --iters 1000 --out /tmp/machete_4096_all_schedules.txt
 ```
 
+H800 SM90 performance: 4096x4096x4096
+-------------------------------------
+Measured on H800 PCIe with `build_cmake_release`, `group_size=128`,
+`warmup=100`, and `iters=1000`. The reported time is CUDA event time around the
+timed GEMM loop; Machete prepack is run before timing. Effective dense TFLOPS is
+`2*M*N*K / time`.
+
+Command:
+
+```
+machete_standalone/build_cmake_release/test_machete_gemm \
+  --m=4096 --n=4096 --k=4096 --group_size=128 \
+  --act=fp16 --quant=gptq_u4b8 \
+  --warmup=100 --iters=1000
+```
+
+| Activation | Quant | Selected schedule | Avg time (us) | Effective TFLOPS |
+|---|---|---|---:|---:|
+| FP16 | GPTQ `u4b8` | `128x128_2x1x1_TmaMI_TmaCoop_streamK` | 354.820 | 387.3 |
+| FP16 | AWQ `u4` | `128x128_2x1x1_TmaMI_TmaCoop_streamK` | 370.910 | 370.5 |
+| BF16 | GPTQ `u4b8` | `128x128_2x1x1_TmaMI_TmaCoop_streamK` | 358.621 | 383.2 |
+| BF16 | AWQ `u4` | `128x128_2x1x1_TmaMI_TmaCoop_streamK` | 360.375 | 381.4 |
+
+CUTLASS example 55 comparison
+-----------------------------
+For reference, CUTLASS example 55 was measured on the same shape with
+`--g=128 --l=1 --shuffle=true --warmup=100 --iterations=1000`.
+
+| Kernel | Mode | Avg time (us) | Effective TFLOPS |
+|---|---|---:|---:|
+| example 55 BF16 | mode 1, group scale | 438.524 | 313.4 |
+| example 55 BF16 | mode 2, group scale + zero | 470.285 | 292.2 |
+| example 55 FP16 | mode 1, group scale | 439.630 | 312.6 |
+| example 55 FP16 | mode 2, group scale + zero | 477.292 | 288.0 |
+
+Machete and example 55 do not use the same kernel even when both have a
+`128x128x64` threadblock tile:
+
+- vLLM's heuristic selects `128x128_2x1x1_TmaMI_TmaCoop_streamK` for 4096^3,
+  while example 55 is hard-coded to `TileShape=128x128x64` and
+  `ClusterShape=1x1x1`.
+- Machete uses `PrepackedLayoutBTemplate` and `MacheteCollectiveMma`, so the
+  int4 weights are prepacked to match the WGMMA register-load pattern more
+  directly.
+- Example 55 uses CUTLASS's generic mixed-input `CollectiveBuilder` with
+  `LayoutB_Reordered` and `ValueShuffle`. Its `--shuffle=true` path is an
+  offline value reorder, but it is still not Machete's prepacked layout or
+  custom mainloop.
+- Machete launches the transposed formulation internally (`Y^T = W^T X^T`) to
+  feed the decompressed weight operand through the GMMA register-sourced side.
+  This changes the memory layout and schedule interpretation relative to the
+  example 55 benchmark.
+
 Heuristic
 ---------
 This is copied from vLLM `csrc/quantization/machete/generate.py`.
