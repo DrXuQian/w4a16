@@ -16,7 +16,7 @@ usage() {
 Usage: $0 --bin <test_fpA_intB_gemm> [--m N] [--n N] [--k N] [--group N] [--warmup N] [--iters N] [--out FILE] [--skip-cuda]
 
 Example:
-  $0 --bin ./build_sm80_ptx_w4a16/test_fpA_intB_gemm --m 1 --n 2048 --k 2048 --group 128 --out results.txt
+  $0 --bin fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm --m 1 --n 2048 --k 2048 --group 128 --out results.txt
 USAGE
 }
 
@@ -53,13 +53,57 @@ fi
 
 map_tile_enum() {
   case "$1" in
-    3) echo "16,128,64";;
-    4) echo "32,128,64";;
-    7) echo "64,128,64";;
-    11) echo "128,128,64";;
-    15) echo "16,256,64";;
+    3) echo "16x128x64";;
+    4) echo "32x128x64";;
+    7) echo "64x128x64";;
+    11) echo "128x128x64";;
+    15) echo "16x256x64";;
     *) return 1;;
   esac
+}
+
+decode_shape_tuple() {
+  local value="$1"
+  echo "$((value / 1000000))x$(((value % 1000000) / 1000))x$((value % 1000))"
+}
+
+config_line_to_arg() {
+  local cfg="$1"
+
+  case "$cfg" in
+    cuda|cuda_kernel|cuda=1)
+      echo "cuda"
+      return 0
+      ;;
+    sm80:*|sm90:*|tma:*)
+      echo "$cfg"
+      return 0
+      ;;
+  esac
+
+  if [[ "$cfg" =~ tile_enum=([0-9]+)[[:space:]]+stages=([0-9]+)[[:space:]]+split_k=([0-9]+) ]]; then
+    local tile_enum="${BASH_REMATCH[1]}"
+    local stages="${BASH_REMATCH[2]}"
+    local split_k="${BASH_REMATCH[3]}"
+    local tile_shape
+    tile_shape=$(map_tile_enum "$tile_enum") || return 1
+    echo "sm80:${tile_shape}:${stages}:${split_k}"
+    return 0
+  fi
+
+  if [[ "$cfg" =~ cuda=0,tma=1,sm=90,tile90=([0-9]+),ml=0,el=0,cl=([0-9]+) ]]; then
+    echo "sm90:$(decode_shape_tuple "${BASH_REMATCH[1]}"):$(decode_shape_tuple "${BASH_REMATCH[2]}")"
+    return 0
+  fi
+
+  if [[ "$cfg" =~ cuda=0,tma=0,tile80=([0-9]+),stages=([0-9]+),splitk=([0-9]+) ]]; then
+    local tile_shape
+    tile_shape=$(map_tile_enum "${BASH_REMATCH[1]}") || return 1
+    echo "sm80:${tile_shape}:${BASH_REMATCH[2]}:${BASH_REMATCH[3]}"
+    return 0
+  fi
+
+  return 1
 }
 
 configs=$($BIN --list_configs | sed -n 's/^ *[0-9]\+: //p')
@@ -71,23 +115,16 @@ while IFS= read -r cfg; do
     continue
   fi
 
-  if [[ "$cfg" == "cuda_kernel" ]]; then
-    if [[ "$SKIP_CUDA" -eq 1 ]]; then
-      continue
-    fi
-    config_arg="cuda"
+  if [[ "$SKIP_CUDA" -eq 1 && ( "$cfg" == "cuda" || "$cfg" == "cuda_kernel" || "$cfg" == "cuda=1" ) ]]; then
+    continue
+  fi
+
+  if config_arg=$(config_line_to_arg "$cfg"); then
+    :
   else
-    if [[ "$cfg" =~ tile_enum=([0-9]+)[[:space:]]+stages=([0-9]+)[[:space:]]+split_k=([0-9]+) ]]; then
-      tile_enum="${BASH_REMATCH[1]}"
-      stages="${BASH_REMATCH[2]}"
-      split_k="${BASH_REMATCH[3]}"
-      tile_shape=$(map_tile_enum "$tile_enum") || { echo "Unknown tile_enum=$tile_enum" >&2; fail=$((fail+1)); continue; }
-      config_arg="${tile_shape},${stages},${split_k}"
-    else
-      echo "Unrecognized config line: $cfg" >&2
-      fail=$((fail+1))
-      continue
-    fi
+    echo "Unrecognized config line: $cfg" >&2
+    fail=$((fail+1))
+    continue
   fi
 
   cmd=("$BIN" "--m=$M" "--n=$N" "--k=$K" "--group_size=$GROUP" "--warmup=$WARMUP" "--iters=$ITERS" "--config=$config_arg")

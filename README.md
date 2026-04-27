@@ -46,7 +46,9 @@ fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm --m=1 --n=12288 --k=3
 
 # Force a specific config (skip profiling entirely)
 fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm --m=1 --n=12288 --k=3072 --group_size=128 --config=cuda
-fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm --m=3823 --n=12288 --k=3072 --group_size=128 --config=64,16,64,4,1
+fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm --m=3823 --n=12288 --k=3072 --group_size=128 --config=sm90:128x256x128:2x1x1
+# On an SM80 build:
+fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm --m=1 --n=2048 --k=3584 --group_size=128 --config=sm80:128x128x64:3:7
 
 # List all available configs
 fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm --list_configs

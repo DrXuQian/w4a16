@@ -85,58 +85,42 @@ fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm \
   --config=cuda
 ```
 
-Force a CUTLASS config (tile_m,tile_n,tile_k,stages,split_k):
+Force an SM90 TMA CUTLASS config:
 
 ```
 fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm \
-  --m=1 --n=4096 --k=4096 --group_size=128 \
-  --config=16x128x64x3x1
+  --m=3823 --n=12288 --k=3072 --group_size=128 \
+  --config=sm90:128x256x128:2x1x1
 ```
 
-Interpreting `--list_configs` output (`tile_enum/stages/split_k`)
------------------------------------------------------------------
-`--list_configs` prints CUTLASS candidates in the form:
-
-- `tile_enum=<int> stages=<int> split_k=<int>`
-
-Meaning:
-
-- `tile_enum`: the underlying integer value of `cutlass_extensions::CutlassTileConfig`
-  (see `fpA_intB_standalone/cpp/tensorrt_llm/cutlass_extensions/include/cutlass_extensions/gemm_configs.h`).
-  The enum name encodes the CTA tile shape, e.g. `CtaShape128x128x64_...` means `tile_m=128, tile_n=128, tile_k=64`.
-- `stages`: CUTLASS mainloop pipeline stages.
-- `split_k`: serial split-K factor (when `> 1`).
-
-Example: `tile_enum=11 stages=3 split_k=7` corresponds to:
-
-- `tile_enum=11` -> `CtaShape128x128x64_WarpShape128x32x64` -> `tile_m=128 tile_n=128 tile_k=64`
-- so the CLI form is:
+Force an SM80 CUTLASS config:
 
 ```
 fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm \
   --m=1 --n=2048 --k=3584 --group_size=128 \
-  --config=128x128x64x3x7
+  --config=sm80:128x128x64:3:7
 ```
 
 Notes:
 - `split_k` must divide K and keep `K / split_k` a multiple of 64 (weight-only fpA_intB requirement).
   For example `K=2048` cannot use `split_k=7` (not divisible).
-- The standalone `--config=tile_m,tile_n,tile_k,stages,split_k` interface selects by tile shape; it does not accept
-  `tile_enum` directly.
+- The old SM80 spelling `--config=128x128x64x3x7` is still accepted for compatibility, but new commands should use
+  `--config=sm80:128x128x64:3:7`.
 
-NCU mode (profile one iteration)
---------------------------------
-`--ncu` disables the separate warmup loop and sets a larger default `--iters` so you can use Nsight Compute
-to capture a single steady-state launch via `--launch-skip/--launch-count`.
-
-Note: `--ncu` requires `--config=...` to avoid profiling-style config search.
-
-Example:
+Interpreting `--list_configs` output
+------------------------------------
+`--list_configs` prints values that can be passed back directly to `--config=`:
 
 ```
-fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm \
-  --m=1 --n=2048 --k=2048 --group_size=128 \
-  --ncu --config=cuda --iters=2000
+0: cuda
+1: sm90:64x16x128:1x1x1
+2: sm90:128x256x128:2x1x1
+```
+
+On an SM80 build the CUTLASS entries use the same aligned spelling:
+
+```
+sm80:128x128x64:3:1
 ```
 
 Debug profile logging (config search)

@@ -14,6 +14,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -41,7 +42,8 @@ void print_usage(char const* name)
 {
     std::printf(
         "Usage: %s [--m=N] [--n=N] [--k=N] [--group_size=N] [--warmup=N] [--iters=N] [--verify] [--list_configs] "
-        "[--config=cuda|tile_m,tile_n,tile_k,stages,split_k] [--tactic=<file>]\n",
+        "[--config=cuda|sm80:tile_mxtile_nxtile_k:stages:split_k|sm90:tile_mxtile_nxtile_k:cluster_mxcluster_nxcluster_k] "
+        "[--tactic=<file>]\n",
         name);
 }
 
@@ -92,6 +94,277 @@ bool tile_from_shape(int tile_m, int tile_n, int tile_k,
     return false;
 }
 
+bool shape_from_tile80(tensorrt_llm::cutlass_extensions::CutlassTileConfig tile, int& tile_m, int& tile_n, int& tile_k)
+{
+    using Config = tensorrt_llm::cutlass_extensions::CutlassTileConfig;
+    tile_k = 64;
+    switch (tile)
+    {
+    case Config::CtaShape16x128x64_WarpShape16x32x64:
+        tile_m = 16;
+        tile_n = 128;
+        return true;
+    case Config::CtaShape16x256x64_WarpShape16x64x64:
+        tile_m = 16;
+        tile_n = 256;
+        return true;
+    case Config::CtaShape32x128x64_WarpShape32x32x64:
+        tile_m = 32;
+        tile_n = 128;
+        return true;
+    case Config::CtaShape64x128x64_WarpShape64x32x64:
+        tile_m = 64;
+        tile_n = 128;
+        return true;
+    case Config::CtaShape128x128x64_WarpShape128x32x64:
+        tile_m = 128;
+        tile_n = 128;
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool tile90_from_shape(int tile_m, int tile_n, int tile_k,
+    tensorrt_llm::cutlass_extensions::CutlassTileConfigSM90& out)
+{
+    using Config = tensorrt_llm::cutlass_extensions::CutlassTileConfigSM90;
+    if (tile_k != 128)
+    {
+        return false;
+    }
+    if (tile_m == 64 && tile_n == 16)
+    {
+        out = Config::CtaShape64x16x128B;
+        return true;
+    }
+    if (tile_m == 64 && tile_n == 32)
+    {
+        out = Config::CtaShape64x32x128B;
+        return true;
+    }
+    if (tile_m == 64 && tile_n == 64)
+    {
+        out = Config::CtaShape64x64x128B;
+        return true;
+    }
+    if (tile_m == 64 && tile_n == 128)
+    {
+        out = Config::CtaShape64x128x128B;
+        return true;
+    }
+    if (tile_m == 64 && tile_n == 256)
+    {
+        out = Config::CtaShape64x256x128B;
+        return true;
+    }
+    if (tile_m == 128 && tile_n == 16)
+    {
+        out = Config::CtaShape128x16x128B;
+        return true;
+    }
+    if (tile_m == 128 && tile_n == 32)
+    {
+        out = Config::CtaShape128x32x128B;
+        return true;
+    }
+    if (tile_m == 128 && tile_n == 64)
+    {
+        out = Config::CtaShape128x64x128B;
+        return true;
+    }
+    if (tile_m == 128 && tile_n == 128)
+    {
+        out = Config::CtaShape128x128x128B;
+        return true;
+    }
+    if (tile_m == 128 && tile_n == 256)
+    {
+        out = Config::CtaShape128x256x128B;
+        return true;
+    }
+    return false;
+}
+
+bool decode_shape_tuple(int encoded, int& m, int& n, int& k)
+{
+    if (encoded <= 0 || encoded >= 1000000000)
+    {
+        return false;
+    }
+    m = encoded / 1000000;
+    n = (encoded % 1000000) / 1000;
+    k = encoded % 1000;
+    return m > 0 && n > 0 && k > 0;
+}
+
+std::string shape3_to_string(int m, int n, int k)
+{
+    std::ostringstream out;
+    out << m << "x" << n << "x" << k;
+    return out.str();
+}
+
+bool cluster_from_shape(int cluster_m, int cluster_n, int cluster_k,
+    tensorrt_llm::cutlass_extensions::ClusterShape& out)
+{
+    using Cluster = tensorrt_llm::cutlass_extensions::ClusterShape;
+    if (cluster_k != 1)
+    {
+        return false;
+    }
+    if (cluster_m == 1 && cluster_n == 1)
+    {
+        out = Cluster::ClusterShape_1x1x1;
+        return true;
+    }
+    if (cluster_m == 2 && cluster_n == 1)
+    {
+        out = Cluster::ClusterShape_2x1x1;
+        return true;
+    }
+    if (cluster_m == 1 && cluster_n == 2)
+    {
+        out = Cluster::ClusterShape_1x2x1;
+        return true;
+    }
+    if (cluster_m == 2 && cluster_n == 2)
+    {
+        out = Cluster::ClusterShape_2x2x1;
+        return true;
+    }
+    return false;
+}
+
+bool parse_positive_int(std::string const& spec, int& out)
+{
+    char* end = nullptr;
+    long const value = std::strtol(spec.c_str(), &end, 10);
+    if (end == spec.c_str() || *end != '\0' || value <= 0 || value > std::numeric_limits<int>::max())
+    {
+        return false;
+    }
+    out = static_cast<int>(value);
+    return true;
+}
+
+bool parse_shape3(std::string spec, int& x, int& y, int& z)
+{
+    for (char& ch : spec)
+    {
+        if (ch == 'x' || ch == 'X' || ch == ',')
+        {
+            ch = ' ';
+        }
+    }
+    std::istringstream is(spec);
+    if (!(is >> x >> y >> z))
+    {
+        return false;
+    }
+    int extra = 0;
+    if (is >> extra)
+    {
+        return false;
+    }
+    return x > 0 && y > 0 && z > 0;
+}
+
+std::vector<std::string> split_string(std::string const& str, char delim)
+{
+    std::vector<std::string> parts;
+    std::stringstream ss(str);
+    std::string item;
+    while (std::getline(ss, item, delim))
+    {
+        parts.push_back(item);
+    }
+    return parts;
+}
+
+bool parse_sm80_config(std::vector<std::string> const& parts, Args& args)
+{
+    if (parts.size() != 4)
+    {
+        return false;
+    }
+
+    int tile_m = 0;
+    int tile_n = 0;
+    int tile_k = 0;
+    if (!parse_shape3(parts[1], tile_m, tile_n, tile_k))
+    {
+        return false;
+    }
+
+    int stages = 0;
+    int split_k = 0;
+    if (!parse_positive_int(parts[2], stages) || !parse_positive_int(parts[3], split_k))
+    {
+        return false;
+    }
+
+    tensorrt_llm::cutlass_extensions::CutlassTileConfig tile_config;
+    if (!tile_from_shape(tile_m, tile_n, tile_k, tile_config))
+    {
+        return false;
+    }
+
+    args.forced_config = tensorrt_llm::cutlass_extensions::CutlassGemmConfig{};
+    args.forced_config.tile_config_sm80 = tile_config;
+    args.forced_config.stages = stages;
+    args.forced_config.split_k_factor = split_k;
+    args.forced_config.split_k_style = split_k > 1
+        ? tensorrt_llm::cutlass_extensions::SplitKStyle::SPLIT_K_SERIAL
+        : tensorrt_llm::cutlass_extensions::SplitKStyle::NO_SPLIT_K;
+    args.forced_config.enableCudaKernel = false;
+    args.forced_config.sm_version = 80;
+    args.force_config = true;
+    return true;
+}
+
+bool parse_sm90_config(std::vector<std::string> const& parts, Args& args)
+{
+    if (parts.size() != 3)
+    {
+        return false;
+    }
+
+    int tile_m = 0;
+    int tile_n = 0;
+    int tile_k = 0;
+    if (!parse_shape3(parts[1], tile_m, tile_n, tile_k))
+    {
+        return false;
+    }
+
+    int cluster_m = 0;
+    int cluster_n = 0;
+    int cluster_k = 0;
+    if (!parse_shape3(parts[2], cluster_m, cluster_n, cluster_k))
+    {
+        return false;
+    }
+
+    tensorrt_llm::cutlass_extensions::CutlassTileConfigSM90 tile_config;
+    if (!tile90_from_shape(tile_m, tile_n, tile_k, tile_config))
+    {
+        return false;
+    }
+
+    tensorrt_llm::cutlass_extensions::ClusterShape cluster_shape;
+    if (!cluster_from_shape(cluster_m, cluster_n, cluster_k, cluster_shape))
+    {
+        return false;
+    }
+
+    args.forced_config = tensorrt_llm::cutlass_extensions::CutlassGemmConfig(tile_config,
+        tensorrt_llm::cutlass_extensions::MainloopScheduleType::AUTO,
+        tensorrt_llm::cutlass_extensions::EpilogueScheduleType::AUTO, cluster_shape);
+    args.force_config = true;
+    return true;
+}
+
 bool parse_config_spec(char const* spec, Args& args)
 {
     if (spec == nullptr || *spec == '\0')
@@ -105,6 +378,21 @@ bool parse_config_spec(char const* spec, Args& args)
         return true;
     }
 
+    std::string config_spec(spec);
+    auto parts = split_string(config_spec, ':');
+    if (!parts.empty())
+    {
+        if (parts[0] == "sm80")
+        {
+            return parse_sm80_config(parts, args);
+        }
+        if (parts[0] == "sm90" || parts[0] == "tma")
+        {
+            return parse_sm90_config(parts, args);
+        }
+    }
+
+    // Backward-compatible SM80 spelling: tile_m,tile_n,tile_k,stages,split_k.
     std::string normalized(spec);
     for (char& ch : normalized)
     {
@@ -181,6 +469,48 @@ std::string serialize_config(tensorrt_llm::cutlass_extensions::CutlassGemmConfig
           << ",sk_style=" << static_cast<int>(c.split_k_style);
     }
     return s.str();
+}
+
+std::string format_config_for_cli(tensorrt_llm::cutlass_extensions::CutlassGemmConfig const& c)
+{
+    if (c.enableCudaKernel)
+    {
+        return "cuda";
+    }
+
+    if (c.is_tma_warp_specialized)
+    {
+        if (c.mainloop_schedule != tensorrt_llm::cutlass_extensions::MainloopScheduleType::AUTO
+            || c.epilogue_schedule != tensorrt_llm::cutlass_extensions::EpilogueScheduleType::AUTO)
+        {
+            return serialize_config(c);
+        }
+
+        int tile_m = 0;
+        int tile_n = 0;
+        int tile_k = 0;
+        int cluster_m = 0;
+        int cluster_n = 0;
+        int cluster_k = 0;
+        bool const ok = decode_shape_tuple(static_cast<int>(c.tile_config_sm90), tile_m, tile_n, tile_k)
+            && decode_shape_tuple(static_cast<int>(c.cluster_shape), cluster_m, cluster_n, cluster_k);
+        if (ok)
+        {
+            return "sm90:" + shape3_to_string(tile_m, tile_n, tile_k) + ":"
+                + shape3_to_string(cluster_m, cluster_n, cluster_k);
+        }
+        return serialize_config(c);
+    }
+
+    int tile_m = 0;
+    int tile_n = 0;
+    int tile_k = 0;
+    if (shape_from_tile80(c.tile_config_sm80, tile_m, tile_n, tile_k))
+    {
+        return "sm80:" + shape3_to_string(tile_m, tile_n, tile_k) + ":" + std::to_string(c.stages) + ":"
+            + std::to_string(c.split_k_factor);
+    }
+    return serialize_config(c);
 }
 
 bool deserialize_config(std::string const& str, tensorrt_llm::cutlass_extensions::CutlassGemmConfig& out)
@@ -308,7 +638,8 @@ void parse_args(int argc, char** argv, Args& args)
             if (!parse_config_spec(argv[i] + 9, args))
             {
                 std::fprintf(stderr,
-                    "Invalid --config format. Use --config=cuda or --config=tile_m,tile_n,tile_k,stages,split_k.\n");
+                    "Invalid --config format. Use --config=cuda, --config=sm80:128x128x64:3:1, "
+                    "or --config=sm90:128x256x128:2x1x1.\n");
                 print_usage(argv[0]);
                 std::exit(1);
             }
@@ -333,16 +664,7 @@ void print_all_configs()
     std::printf("Supported configs (%zu):\n", count);
     for (size_t i = 0; i < count; ++i)
     {
-        Config const& cfg = configs[i];
-        if (cfg.enableCudaKernel)
-        {
-            std::printf("  %zu: cuda_kernel\n", i);
-        }
-        else
-        {
-            std::printf("  %zu: tile_enum=%d stages=%d split_k=%d\n", i,
-                static_cast<int>(cfg.tile_config_sm80), cfg.stages, cfg.split_k_factor);
-        }
+        std::printf("  %zu: %s\n", i, format_config_for_cli(configs[i]).c_str());
     }
 }
 
@@ -621,15 +943,7 @@ int main(int argc, char** argv)
         }
     }
 
-    if (config.enableCudaKernel)
-    {
-        std::printf("selected config: cuda_kernel\n");
-    }
-    else
-    {
-        std::printf("selected config: tile_enum=%d stages=%d split_k=%d\n", static_cast<int>(config.tile_config_sm80),
-            config.stages, config.split_k_factor);
-    }
+    std::printf("selected config: %s\n", format_config_for_cli(config).c_str());
 
     for (int i = 0; i < args.warmup; ++i)
     {
