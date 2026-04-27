@@ -46,8 +46,10 @@ nvcc -O3 -std=c++17 -arch=sm_90a --expt-relaxed-constexpr \
 Run
 ---
 
-Steady-state GEMM-only timing. This skips random fill, dequantize, reorder,
-the correctness warmup GEMM, reference GEMM, and comparison kernel:
+Steady-state GEMM-only timing. This skips the GPU random fill, dequantize, and
+reorder setup kernels, then initializes A/B/C/scales with deterministic host
+synthetic data before timing. It also skips the correctness warmup GEMM,
+reference GEMM, and comparison kernel:
 
 ```
 cutlass55_standalone/build_cmake_release/cutlass55_fp16_gemm \
@@ -57,8 +59,9 @@ cutlass55_standalone/build_cmake_release/cutlass55_fp16_gemm \
   --warmup=100 --iterations=1000
 ```
 
-The skipped-setup modes intentionally leave input buffers uninitialized. They
-are for profiler isolation only; output values are not meaningful.
+The skipped-setup modes are for profiler isolation. Output values are not
+meaningful because B is synthetic bytes in the layout consumed by the selected
+kernel path.
 
 Launch exactly one target GEMM kernel:
 
@@ -71,3 +74,18 @@ cutlass55_standalone/build_cmake_release/cutlass55_fp16_gemm \
 
 `--single_kernel` implies `--skip_setup_kernels`, `--skip_verify`,
 `--warmup=0`, and `--iterations=1`.
+
+H800 Validation
+---------------
+FP16 mode 1, `4096x4096x4096`, group size 128, `shuffle=true`,
+`warmup=100`, `iterations=1000`:
+
+| Setup path | Avg time (us) | Effective TFLOPS |
+|---|---:|---:|
+| `--skip_setup_kernels --skip_verify` | 351.389 | 391.1 |
+| initialized + reorder, `--skip_verify` | 345.001 | 398.4 |
+
+`nsys` capture with `--skip_setup_kernels --skip_verify --profile_gemm_only
+--warmup=0 --iterations=10` contains only the target GEMM kernel in the capture
+range. The kernel average was 296.305 us, with no GPU memory operations reported
+inside the captured range.

@@ -14,6 +14,25 @@
 
 namespace machete_standalone {
 
+std::vector<Cutlass55Config> supported_cutlass55_configs()
+{
+    return {
+        {"128x128x64_1x1x1", 128, 128, 1, 1, 1},
+        {"128x64x64_1x1x1", 128, 64, 1, 1, 1},
+        {"128x256x64_1x1x1", 128, 256, 1, 1, 1},
+        {"256x128x64_1x1x1", 256, 128, 1, 1, 1},
+        {"128x128x64_2x1x1", 128, 128, 2, 1, 1},
+        {"128x64x64_2x1x1", 128, 64, 2, 1, 1},
+        {"128x256x64_2x1x1", 128, 256, 2, 1, 1},
+        {"256x128x64_2x1x1", 256, 128, 2, 1, 1},
+    };
+}
+
+Cutlass55Config default_cutlass55_config()
+{
+    return supported_cutlass55_configs().front();
+}
+
 struct Cutlass55Plan
 {
     virtual ~Cutlass55Plan() = default;
@@ -24,7 +43,7 @@ namespace {
 
 using namespace cute;
 
-template <typename ElementA_>
+template <typename ElementA_, int TileN, int TileM, int ClusterN, int ClusterM, int ClusterK>
 struct Cutlass55ScaleOnlyKernel
 {
     using MmaType = ElementA_;
@@ -60,8 +79,8 @@ struct Cutlass55ScaleOnlyKernel
 
     using ArchTag = cutlass::arch::Sm90;
     using OperatorClass = cutlass::arch::OpClassTensorOp;
-    using TileShape = Shape<_128, _128, cute::Int<TileShapeK>>;
-    using ClusterShape = Shape<_1, _1, _1>;
+    using TileShape = Shape<Int<TileN>, Int<TileM>, cute::Int<TileShapeK>>;
+    using ClusterShape = Shape<Int<ClusterN>, Int<ClusterM>, Int<ClusterK>>;
     using KernelSchedule = cutlass::gemm::KernelTmaWarpSpecializedCooperative;
     using EpilogueSchedule = cutlass::epilogue::TmaWarpSpecializedCooperative;
     using EpilogueTileType = cutlass::epilogue::collective::EpilogueTileAuto;
@@ -135,6 +154,54 @@ struct Cutlass55ScaleOnlyKernel
     }
 };
 
+template <typename ElementA, int TileN, int TileM, int ClusterN, int ClusterM, int ClusterK>
+using Cutlass55Kernel = Cutlass55ScaleOnlyKernel<ElementA, TileN, TileM, ClusterN, ClusterM, ClusterK>;
+
+#define CUTLASS55_DISPATCH_CONFIG(ELEMENT_A, ...)                                                                      \
+    do                                                                                                                  \
+    {                                                                                                                   \
+        if (config.tile_n == 128 && config.tile_m == 128 && config.cluster_n == 1 && config.cluster_m == 1)             \
+        {                                                                                                               \
+            using Kernel = Cutlass55Kernel<ELEMENT_A, 128, 128, 1, 1, 1>;                                               \
+            __VA_ARGS__;                                                                                                \
+        }                                                                                                               \
+        if (config.tile_n == 128 && config.tile_m == 64 && config.cluster_n == 1 && config.cluster_m == 1)              \
+        {                                                                                                               \
+            using Kernel = Cutlass55Kernel<ELEMENT_A, 128, 64, 1, 1, 1>;                                                \
+            __VA_ARGS__;                                                                                                \
+        }                                                                                                               \
+        if (config.tile_n == 128 && config.tile_m == 256 && config.cluster_n == 1 && config.cluster_m == 1)             \
+        {                                                                                                               \
+            using Kernel = Cutlass55Kernel<ELEMENT_A, 128, 256, 1, 1, 1>;                                               \
+            __VA_ARGS__;                                                                                                \
+        }                                                                                                               \
+        if (config.tile_n == 256 && config.tile_m == 128 && config.cluster_n == 1 && config.cluster_m == 1)             \
+        {                                                                                                               \
+            using Kernel = Cutlass55Kernel<ELEMENT_A, 256, 128, 1, 1, 1>;                                               \
+            __VA_ARGS__;                                                                                                \
+        }                                                                                                               \
+        if (config.tile_n == 128 && config.tile_m == 128 && config.cluster_n == 2 && config.cluster_m == 1)             \
+        {                                                                                                               \
+            using Kernel = Cutlass55Kernel<ELEMENT_A, 128, 128, 2, 1, 1>;                                               \
+            __VA_ARGS__;                                                                                                \
+        }                                                                                                               \
+        if (config.tile_n == 128 && config.tile_m == 64 && config.cluster_n == 2 && config.cluster_m == 1)              \
+        {                                                                                                               \
+            using Kernel = Cutlass55Kernel<ELEMENT_A, 128, 64, 2, 1, 1>;                                                \
+            __VA_ARGS__;                                                                                                \
+        }                                                                                                               \
+        if (config.tile_n == 128 && config.tile_m == 256 && config.cluster_n == 2 && config.cluster_m == 1)             \
+        {                                                                                                               \
+            using Kernel = Cutlass55Kernel<ELEMENT_A, 128, 256, 2, 1, 1>;                                               \
+            __VA_ARGS__;                                                                                                \
+        }                                                                                                               \
+        if (config.tile_n == 256 && config.tile_m == 128 && config.cluster_n == 2 && config.cluster_m == 1)             \
+        {                                                                                                               \
+            using Kernel = Cutlass55Kernel<ELEMENT_A, 256, 128, 2, 1, 1>;                                               \
+            __VA_ARGS__;                                                                                                \
+        }                                                                                                               \
+    } while (0)
+
 template <typename Kernel>
 void run_kernel(cudaStream_t stream, typename Kernel::ElementA const* A, typename Kernel::ElementB const* B,
     typename Kernel::ElementScale const* scales, typename Kernel::ElementC const* C, typename Kernel::ElementD* D,
@@ -197,20 +264,22 @@ size_t workspace_size(typename Kernel::ElementA const* A, typename Kernel::Eleme
 void cutlass55_reorder_B_fp16_s4(cudaStream_t stream, cutlass::int4b_t const* b_in, cutlass::int4b_t* b_out,
     int k, int n)
 {
-    Cutlass55ScaleOnlyKernel<cutlass::half_t>::reorder_B(stream, b_in, b_out, k, n);
+    using Kernel = Cutlass55Kernel<cutlass::half_t, 128, 128, 1, 1, 1>;
+    Kernel::reorder_B(stream, b_in, b_out, k, n);
 }
 
 void cutlass55_reorder_B_bf16_s4(cudaStream_t stream, cutlass::int4b_t const* b_in, cutlass::int4b_t* b_out,
     int k, int n)
 {
-    Cutlass55ScaleOnlyKernel<cutlass::bfloat16_t>::reorder_B(stream, b_in, b_out, k, n);
+    using Kernel = Cutlass55Kernel<cutlass::bfloat16_t, 128, 128, 1, 1, 1>;
+    Kernel::reorder_B(stream, b_in, b_out, k, n);
 }
 
 void cutlass55_mm_fp16_s4(cudaStream_t stream, cutlass::half_t const* A, cutlass::int4b_t const* B_reordered,
     cutlass::half_t const* scales, cutlass::half_t const* C, cutlass::half_t* D, int m, int n, int k,
     int group_size, void* workspace, size_t workspace_bytes)
 {
-    using Kernel = Cutlass55ScaleOnlyKernel<cutlass::half_t>;
+    using Kernel = Cutlass55Kernel<cutlass::half_t, 128, 128, 1, 1, 1>;
     run_kernel<Kernel>(stream, A, B_reordered, scales, C, D, m, n, k, group_size, workspace, workspace_bytes);
 }
 
@@ -218,40 +287,47 @@ void cutlass55_mm_bf16_s4(cudaStream_t stream, cutlass::bfloat16_t const* A, cut
     cutlass::bfloat16_t const* scales, cutlass::bfloat16_t const* C, cutlass::bfloat16_t* D, int m, int n,
     int k, int group_size, void* workspace, size_t workspace_bytes)
 {
-    using Kernel = Cutlass55ScaleOnlyKernel<cutlass::bfloat16_t>;
+    using Kernel = Cutlass55Kernel<cutlass::bfloat16_t, 128, 128, 1, 1, 1>;
     run_kernel<Kernel>(stream, A, B_reordered, scales, C, D, m, n, k, group_size, workspace, workspace_bytes);
 }
 
 size_t cutlass55_get_workspace_size_fp16_s4(cutlass::half_t const* A, cutlass::int4b_t const* B_reordered,
     cutlass::half_t const* scales, cutlass::half_t const* C, cutlass::half_t* D, int m, int n, int k,
-    int group_size)
+    int group_size, Cutlass55Config config)
 {
-    using Kernel = Cutlass55ScaleOnlyKernel<cutlass::half_t>;
-    return workspace_size<Kernel>(A, B_reordered, scales, C, D, m, n, k, group_size);
+    CUTLASS55_DISPATCH_CONFIG(cutlass::half_t,
+        return workspace_size<Kernel>(A, B_reordered, scales, C, D, m, n, k, group_size));
+    MACHETE_CHECK(false, "unsupported CUTLASS55 config", config.name);
 }
 
 size_t cutlass55_get_workspace_size_bf16_s4(cutlass::bfloat16_t const* A, cutlass::int4b_t const* B_reordered,
     cutlass::bfloat16_t const* scales, cutlass::bfloat16_t const* C, cutlass::bfloat16_t* D, int m, int n,
-    int k, int group_size)
+    int k, int group_size, Cutlass55Config config)
 {
-    using Kernel = Cutlass55ScaleOnlyKernel<cutlass::bfloat16_t>;
-    return workspace_size<Kernel>(A, B_reordered, scales, C, D, m, n, k, group_size);
+    CUTLASS55_DISPATCH_CONFIG(cutlass::bfloat16_t,
+        return workspace_size<Kernel>(A, B_reordered, scales, C, D, m, n, k, group_size));
+    MACHETE_CHECK(false, "unsupported CUTLASS55 config", config.name);
 }
 
 Cutlass55Plan* cutlass55_create_plan_fp16_s4(cudaStream_t stream, cutlass::half_t const* A,
     cutlass::int4b_t const* B_reordered, cutlass::half_t const* scales, cutlass::half_t const* C, cutlass::half_t* D,
-    int m, int n, int k, int group_size, void* workspace, size_t workspace_bytes)
+    int m, int n, int k, int group_size, Cutlass55Config config, void* workspace, size_t workspace_bytes)
 {
-    using Kernel = Cutlass55ScaleOnlyKernel<cutlass::half_t>;
-    return create_plan<Kernel>(stream, A, B_reordered, scales, C, D, m, n, k, group_size, workspace, workspace_bytes);
+    CUTLASS55_DISPATCH_CONFIG(cutlass::half_t,
+        return create_plan<Kernel>(
+            stream, A, B_reordered, scales, C, D, m, n, k, group_size, workspace, workspace_bytes));
+    MACHETE_CHECK(false, "unsupported CUTLASS55 config", config.name);
 }
 
 Cutlass55Plan* cutlass55_create_plan_bf16_s4(cudaStream_t stream, cutlass::bfloat16_t const* A,
     cutlass::int4b_t const* B_reordered, cutlass::bfloat16_t const* scales, cutlass::bfloat16_t const* C,
-    cutlass::bfloat16_t* D, int m, int n, int k, int group_size, void* workspace, size_t workspace_bytes)
+    cutlass::bfloat16_t* D, int m, int n, int k, int group_size, Cutlass55Config config, void* workspace,
+    size_t workspace_bytes)
 {
-    using Kernel = Cutlass55ScaleOnlyKernel<cutlass::bfloat16_t>;
-    return create_plan<Kernel>(stream, A, B_reordered, scales, C, D, m, n, k, group_size, workspace, workspace_bytes);
+    CUTLASS55_DISPATCH_CONFIG(cutlass::bfloat16_t,
+        return create_plan<Kernel>(
+            stream, A, B_reordered, scales, C, D, m, n, k, group_size, workspace, workspace_bytes));
+    MACHETE_CHECK(false, "unsupported CUTLASS55 config", config.name);
 }
 
 void cutlass55_run_plan(Cutlass55Plan* plan, cudaStream_t stream)

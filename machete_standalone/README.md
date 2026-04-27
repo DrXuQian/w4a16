@@ -76,8 +76,9 @@ machete_standalone/build_cmake_release/test_machete_gemm \
 ```
 
 CUTLASS example-55 backend inside the same test binary. This path supports
-mode 1 only: signed INT4 weights with group scales, `TileShape=128x128x64`,
-`ClusterShape=1x1x1`, and the example-55 value shuffle layout.
+mode 1 only: signed INT4 weights with group scales and the example-55 value
+shuffle layout. The default config is the original example-55
+`128x128x64_1x1x1` tile/cluster shape.
 
 ```
 machete_standalone/build_cmake_release/test_machete_gemm \
@@ -85,6 +86,34 @@ machete_standalone/build_cmake_release/test_machete_gemm \
   --m=4096 --n=4096 --k=4096 --group_size=128 \
   --act=fp16 --quant=cutlass_s4 \
   --warmup=100 --iters=1000
+```
+
+List CUTLASS55 configs:
+
+```
+machete_standalone/build_cmake_release/test_machete_gemm \
+  --list_cutlass55_configs
+```
+
+Force one CUTLASS55 config:
+
+```
+machete_standalone/build_cmake_release/test_machete_gemm \
+  --backend=cutlass55 \
+  --cutlass55_config=256x128x64_1x1x1 \
+  --m=4096 --n=4096 --k=4096 --group_size=128 \
+  --act=fp16 --quant=cutlass_s4 \
+  --offline_prepack --no_checksum --warmup=100 --iters=1000
+```
+
+Search all compiled CUTLASS55 configs sequentially:
+
+```
+machete_standalone/build_cmake_release/test_machete_gemm \
+  --search_cutlass55_configs \
+  --m=4096 --n=4096 --k=4096 --group_size=128 \
+  --act=fp16 --quant=cutlass_s4 \
+  --offline_prepack --no_checksum --warmup=100 --iters=1000
 ```
 
 AWQ-style u4:
@@ -237,32 +266,38 @@ Machete standalone test binary without changing the original Machete backend.
 It initializes the CUTLASS adapter once before timing; the timed loop only calls
 `gemm.run()`.
 
-Commands:
+Compiled config set:
 
-```
-machete_standalone/build_cmake_release/test_machete_gemm \
-  --backend=cutlass55 \
-  --m=4096 --n=4096 --k=4096 --group_size=128 \
-  --act=fp16 --quant=cutlass_s4 \
-  --offline_prepack --no_checksum --warmup=100 --iters=1000
-```
+| Config | Notes |
+|---|---|
+| `128x128x64_1x1x1` | CUTLASS example-55 default |
+| `128x64x64_1x1x1` | Smaller M tile |
+| `128x256x64_1x1x1` | Larger M tile |
+| `256x128x64_1x1x1` | Larger N tile |
+| `128x128x64_2x1x1` | Cluster-N 2 |
+| `128x64x64_2x1x1` | Smaller M tile, Cluster-N 2 |
+| `128x256x64_2x1x1` | Larger M tile, Cluster-N 2 |
+| `256x128x64_2x1x1` | Larger N tile, Cluster-N 2 |
 
-```
-machete_standalone/build_cmake_release/test_machete_gemm \
-  --backend=machete \
-  --m=4096 --n=4096 --k=4096 --group_size=128 \
-  --act=fp16 --quant=gptq_u4b8 \
-  --offline_prepack --no_checksum --warmup=100 --iters=1000
-```
+`64x*` as the first tile dimension is intentionally not included: the
+cooperative SM90 kernel has a CUTLASS static assertion requiring tile M
+`>= 128`.
 
-Event-time measurements on H800 PCIe:
+H800 PCIe event-time measurements for
+`4096x4096x4096`, FP16, group size 128, synthetic prepacked data,
+`warmup=100`, `iters=1000`:
 
-| Backend | Data path | Avg time (us) | Effective TFLOPS |
-|---|---|---:|---:|
-| Machete | synthetic prepacked data | 356.764 | 385.2 |
-| CUTLASS55 in Machete binary | synthetic prepacked data | 343.894 | 399.7 |
-| CUTLASS55 in Machete binary | runtime reorder before timing | 351.957 | 390.5 |
-| CUTLASS55 standalone | initialized + reorder before timing | 353.483 | 388.8 |
+| Backend/config | Avg time (us) | Effective TFLOPS |
+|---|---:|---:|
+| Machete `128x128_2x1x1_TmaMI_TmaCoop_streamK` | 356.764 | 385.2 |
+| CUTLASS55 `128x128x64_1x1x1` | 345.916 | 397.3 |
+| CUTLASS55 `128x64x64_1x1x1` | 462.896 | 296.9 |
+| CUTLASS55 `128x256x64_1x1x1` | 331.355 | 414.8 |
+| CUTLASS55 `256x128x64_1x1x1` | 312.123 | 440.3 |
+| CUTLASS55 `128x128x64_2x1x1` | 349.728 | 393.0 |
+| CUTLASS55 `128x64x64_2x1x1` | 462.586 | 297.1 |
+| CUTLASS55 `128x256x64_2x1x1` | 317.692 | 432.6 |
+| CUTLASS55 `256x128x64_2x1x1` | 315.717 | 435.3 |
 
 `nsys` GPU-kernel summaries with `--profile_gemm_only --warmup=0 --iters=10`
 show that the captured range contains only the target GEMM kernel and no GPU
@@ -274,10 +309,6 @@ the host submission loop:
 | Machete backend | 10 | 298.246 |
 | CUTLASS55 in Machete binary | 10 | 302.873 |
 | CUTLASS55 standalone, initialized + reorder before timing | 10 | 300.853 |
-
-Do not compare against `cutlass55_standalone --skip_setup_kernels` as a final
-number. That path leaves the weight and scale buffers uninitialized, and on this
-machine it reports a much faster but unrealistic kernel time.
 
 Heuristic
 ---------

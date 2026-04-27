@@ -27,11 +27,14 @@ struct Args
     int warmup = 10;
     int iters = 100;
     bool list_schedules = false;
+    bool list_cutlass55_configs = false;
+    bool search_cutlass55_configs = false;
     bool no_checksum = false;
     bool offline_prepack = false;
     bool profile_gemm_only = false;
     std::string backend = "machete";
     std::string schedule;
+    std::string cutlass55_config = "128x128x64_1x1x1";
     std::string act = "fp16";
     std::string quant = "gptq_u4b8";
     std::string offline_prepack_path;
@@ -53,9 +56,9 @@ void print_usage(char const* name)
 {
     std::printf("Usage: %s [--m=N] [--n=N] [--k=N] [--group_size=N|-1] [--warmup=N] [--iters=N] "
                 "[--backend=machete|cutlass55] [--act=fp16|bf16] [--quant=gptq_u4b8|awq_u4|cutlass_s4] "
-                "[--schedule=<name>] "
+                "[--schedule=<name>] [--cutlass55_config=<name>] [--search_cutlass55_configs] "
                 "[--save_prepacked=PATH] [--offline_prepack[=PATH]] [--profile_gemm_only] [--no_checksum] "
-                "[--list_schedules]\n",
+                "[--list_schedules] [--list_cutlass55_configs]\n",
         name);
 }
 
@@ -79,6 +82,16 @@ void parse_args(int argc, char** argv, Args& args)
             args.schedule = argv[i] + 11;
             continue;
         }
+        if (std::strncmp(argv[i], "--cutlass55_config=", 19) == 0)
+        {
+            args.cutlass55_config = argv[i] + 19;
+            continue;
+        }
+        if (std::strncmp(argv[i], "--cutlass55-config=", 19) == 0)
+        {
+            args.cutlass55_config = argv[i] + 19;
+            continue;
+        }
         if (std::strncmp(argv[i], "--backend=", 10) == 0)
         {
             args.backend = argv[i] + 10;
@@ -97,6 +110,19 @@ void parse_args(int argc, char** argv, Args& args)
         if (std::strcmp(argv[i], "--list_schedules") == 0)
         {
             args.list_schedules = true;
+            continue;
+        }
+        if (std::strcmp(argv[i], "--list_cutlass55_configs") == 0
+            || std::strcmp(argv[i], "--list-cutlass55-configs") == 0)
+        {
+            args.list_cutlass55_configs = true;
+            continue;
+        }
+        if (std::strcmp(argv[i], "--search_cutlass55_configs") == 0
+            || std::strcmp(argv[i], "--search-cutlass55-configs") == 0)
+        {
+            args.search_cutlass55_configs = true;
+            args.backend = "cutlass55";
             continue;
         }
         if (std::strcmp(argv[i], "--profile_gemm_only") == 0 || std::strcmp(argv[i], "--profile-gemm-only") == 0)
@@ -234,6 +260,20 @@ std::vector<uint32_t> make_synthetic_prepacked_words(size_t words)
     return packed;
 }
 
+machete_standalone::Cutlass55Config find_cutlass55_config(std::string const& name)
+{
+    for (auto const& config : machete_standalone::supported_cutlass55_configs())
+    {
+        if (name == config.name)
+        {
+            return config;
+        }
+    }
+    std::fprintf(stderr, "Unknown CUTLASS55 config: %s\n", name.c_str());
+    std::fprintf(stderr, "Use --list_cutlass55_configs to list supported configs.\n");
+    std::exit(1);
+}
+
 template <typename Element>
 void run_case(Args const& args)
 {
@@ -245,6 +285,12 @@ void run_case(Args const& args)
     {
         std::fprintf(stderr, "Unsupported --backend=%s\n", args.backend.c_str());
         std::exit(1);
+    }
+
+    Cutlass55Config cutlass55_config = default_cutlass55_config();
+    if (is_cutlass55)
+    {
+        cutlass55_config = find_cutlass55_config(args.cutlass55_config);
     }
 
     MacheteSchedule schedule{};
@@ -291,7 +337,9 @@ void run_case(Args const& args)
         args.backend.c_str(), args.act.c_str(), is_cutlass55 ? "cutlass_s4" : args.quant.c_str());
     if (is_cutlass55)
     {
-        std::printf("selected backend config: cutlass55 mode1 scale-only 128x128x64 cluster=1x1x1\n");
+        std::printf("selected backend config: cutlass55 mode1 scale-only %dx%dx64 cluster=%dx%dx%d (%s)\n",
+            cutlass55_config.tile_n, cutlass55_config.tile_m, cutlass55_config.cluster_n,
+            cutlass55_config.cluster_m, cutlass55_config.cluster_k, cutlass55_config.name);
     }
     else
     {
@@ -466,7 +514,7 @@ void run_case(Args const& args)
         {
             workspace_bytes = cutlass55_get_workspace_size_fp16_s4(d_a,
                 reinterpret_cast<cutlass::int4b_t const*>(d_b_prepacked), d_scales, d_c, d_out, args.m, args.n,
-                args.k, args.group_size);
+                args.k, args.group_size, cutlass55_config);
         }
         else if (is_gptq)
         {
@@ -487,7 +535,7 @@ void run_case(Args const& args)
         {
             workspace_bytes = cutlass55_get_workspace_size_bf16_s4(d_a,
                 reinterpret_cast<cutlass::int4b_t const*>(d_b_prepacked), d_scales, d_c, d_out, args.m, args.n,
-                args.k, args.group_size);
+                args.k, args.group_size, cutlass55_config);
         }
         else if (is_gptq)
         {
@@ -516,13 +564,13 @@ void run_case(Args const& args)
         {
             cutlass55_plan = cutlass55_create_plan_fp16_s4(stream, d_a,
                 reinterpret_cast<cutlass::int4b_t const*>(d_b_prepacked), d_scales, d_c, d_out, args.m, args.n,
-                args.k, args.group_size, d_workspace, workspace_bytes);
+                args.k, args.group_size, cutlass55_config, d_workspace, workspace_bytes);
         }
         else
         {
             cutlass55_plan = cutlass55_create_plan_bf16_s4(stream, d_a,
                 reinterpret_cast<cutlass::int4b_t const*>(d_b_prepacked), d_scales, d_c, d_out, args.m, args.n,
-                args.k, args.group_size, d_workspace, workspace_bytes);
+                args.k, args.group_size, cutlass55_config, d_workspace, workspace_bytes);
         }
     }
 
@@ -640,6 +688,16 @@ int main(int argc, char** argv)
 {
     Args args;
     parse_args(argc, argv, args);
+    if (args.list_cutlass55_configs)
+    {
+        auto configs = machete_standalone::supported_cutlass55_configs();
+        std::printf("Supported CUTLASS55 configs (%zu):\n", configs.size());
+        for (size_t i = 0; i < configs.size(); ++i)
+        {
+            std::printf("  %zu: %s\n", i, configs[i].name);
+        }
+        return 0;
+    }
     if (args.list_schedules)
     {
         auto schedules = machete_standalone::supported_schedules();
@@ -653,6 +711,36 @@ int main(int argc, char** argv)
 
     try
     {
+        auto run_one = [](Args const& run_args) {
+            if (run_args.act == "fp16")
+            {
+                run_case<cutlass::half_t>(run_args);
+            }
+            else if (run_args.act == "bf16")
+            {
+                run_case<cutlass::bfloat16_t>(run_args);
+            }
+            else
+            {
+                std::fprintf(stderr, "Unsupported --act=%s\n", run_args.act.c_str());
+                std::exit(1);
+            }
+        };
+
+        if (args.search_cutlass55_configs)
+        {
+            args.backend = "cutlass55";
+            auto configs = machete_standalone::supported_cutlass55_configs();
+            for (auto const& config : configs)
+            {
+                Args run_args = args;
+                run_args.cutlass55_config = config.name;
+                std::printf("\n===== CUTLASS55 config: %s =====\n", config.name);
+                run_one(run_args);
+            }
+            return 0;
+        }
+
         if (args.act == "fp16")
         {
             run_case<cutlass::half_t>(args);

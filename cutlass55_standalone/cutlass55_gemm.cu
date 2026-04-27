@@ -82,7 +82,9 @@
       $ ./examples/55_hopper_mixed_dtype_gemm/55_hopper_int4_bf16_gemm --m=4096 --n=5120 --k=8192 --g=8192 --mode=1
 */
 
+#include <cstdint>
 #include <iostream>
+#include <vector>
 
 #include <cuda_profiler_api.h>
 
@@ -450,6 +452,31 @@ struct Options : MixedDtypeOptions{
 /// GEMM setup and evaluation
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
+template <typename Element>
+void copy_synthetic_tensor(cutlass::DeviceAllocation<Element>& allocation, float scale)
+{
+  std::vector<Element> host(allocation.capacity);
+  for (size_t i = 0; i < host.size(); ++i) {
+    host[i] = Element(float((i % 113) + 1) * scale);
+  }
+  CUDA_CHECK(cudaMemcpy(allocation.get(), host.data(), host.size() * sizeof(Element), cudaMemcpyHostToDevice));
+}
+
+template <typename Element>
+void copy_synthetic_bytes(cutlass::DeviceAllocation<Element>& allocation)
+{
+  size_t const bytes = cutlass::DeviceAllocation<Element>::bytes(allocation.capacity);
+  std::vector<uint8_t> host(bytes);
+  uint32_t state = 0x6d2b79f5u;
+  for (size_t i = 0; i < host.size(); ++i) {
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+    host[i] = static_cast<uint8_t>(state & 0xffu);
+  }
+  CUDA_CHECK(cudaMemcpy(allocation.get(), host.data(), bytes, cudaMemcpyHostToDevice));
+}
+
 /// Initialize operands to be used in the GEMM and reference GEMM
 void initialize(Options const& options) {
 
@@ -489,6 +516,11 @@ void initialize(Options const& options) {
     layout_B_reordered = cute::tile_to_shape(LayoutAtomQuant{}, shape_B);
   }
   if (options.skip_setup_kernels) {
+    copy_synthetic_tensor(block_A, 0.01f);
+    copy_synthetic_bytes(block_B);
+    copy_synthetic_tensor(block_C, 0.01f);
+    copy_synthetic_tensor(block_scale, 0.001f);
+    copy_synthetic_tensor(block_zero, 0.01f);
     return;
   }
 
