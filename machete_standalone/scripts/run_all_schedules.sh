@@ -11,6 +11,7 @@ QUANT=gptq_u4b8
 WARMUP=10
 ITERS=100
 OUT=""
+OFFLINE_PREPACK=""
 
 usage() {
   cat <<'USAGE'
@@ -26,6 +27,7 @@ Options:
   --quant gptq_u4b8|awq_u4
   --warmup N
   --iters N
+  --offline-prepack PATH   load B from an offline Machete prepack file
   --out PATH       tee output to PATH
 USAGE
 }
@@ -41,6 +43,7 @@ while [[ $# -gt 0 ]]; do
     --quant) QUANT="$2"; shift 2 ;;
     --warmup) WARMUP="$2"; shift 2 ;;
     --iters) ITERS="$2"; shift 2 ;;
+    --offline-prepack|--offline_prepack) OFFLINE_PREPACK="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
     --help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 1 ;;
@@ -53,13 +56,18 @@ if [[ ! -x "$BIN" ]]; then
 fi
 
 run() {
+  extra_args=()
+  if [[ -n "$OFFLINE_PREPACK" ]]; then
+    extra_args+=(--offline_prepack="$OFFLINE_PREPACK")
+  fi
   "$BIN" --list_schedules | awk '/^[[:space:]]+[0-9]+:/ {print $2}' | while read -r schedule; do
     echo "===== $schedule ====="
     "$BIN" \
       --m="$M" --n="$N" --k="$K" --group_size="$GROUP" \
       --act="$ACT" --quant="$QUANT" \
       --warmup="$WARMUP" --iters="$ITERS" \
-      --schedule="$schedule"
+      --schedule="$schedule" \
+      "${extra_args[@]}"
   done
 }
 

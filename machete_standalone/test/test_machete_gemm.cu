@@ -1,5 +1,6 @@
 #include "quantization/machete/machete_standalone_gemm.cuh"
 
+#include <cuda_profiler_api.h>
 #include <cuda_runtime.h>
 
 #include <algorithm>
@@ -8,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <string>
 #include <type_traits>
@@ -24,9 +26,13 @@ struct Args
     int warmup = 10;
     int iters = 100;
     bool list_schedules = false;
+    bool no_checksum = false;
+    bool profile_gemm_only = false;
     std::string schedule;
     std::string act = "fp16";
     std::string quant = "gptq_u4b8";
+    std::string offline_prepack_path;
+    std::string save_prepacked_path;
 };
 
 bool parse_int(char const* arg, char const* key, int& out)
@@ -43,7 +49,9 @@ bool parse_int(char const* arg, char const* key, int& out)
 void print_usage(char const* name)
 {
     std::printf("Usage: %s [--m=N] [--n=N] [--k=N] [--group_size=N|-1] [--warmup=N] [--iters=N] "
-                "[--act=fp16|bf16] [--quant=gptq_u4b8|awq_u4] [--schedule=<name>] [--list_schedules]\n",
+                "[--act=fp16|bf16] [--quant=gptq_u4b8|awq_u4] [--schedule=<name>] "
+                "[--save_prepacked=PATH] [--offline_prepack=PATH] [--profile_gemm_only] [--no_checksum] "
+                "[--list_schedules]\n",
         name);
 }
 
@@ -82,8 +90,73 @@ void parse_args(int argc, char** argv, Args& args)
             args.list_schedules = true;
             continue;
         }
+        if (std::strcmp(argv[i], "--profile_gemm_only") == 0 || std::strcmp(argv[i], "--profile-gemm-only") == 0)
+        {
+            args.profile_gemm_only = true;
+            continue;
+        }
+        if (std::strcmp(argv[i], "--no_checksum") == 0 || std::strcmp(argv[i], "--no-checksum") == 0)
+        {
+            args.no_checksum = true;
+            continue;
+        }
+        if (std::strncmp(argv[i], "--offline_prepack=", 18) == 0)
+        {
+            args.offline_prepack_path = argv[i] + 18;
+            continue;
+        }
+        if (std::strncmp(argv[i], "--offline-prepack=", 18) == 0)
+        {
+            args.offline_prepack_path = argv[i] + 18;
+            continue;
+        }
+        if (std::strncmp(argv[i], "--save_prepacked=", 17) == 0)
+        {
+            args.save_prepacked_path = argv[i] + 17;
+            continue;
+        }
+        if (std::strncmp(argv[i], "--save-prepacked=", 17) == 0)
+        {
+            args.save_prepacked_path = argv[i] + 17;
+            continue;
+        }
         std::fprintf(stderr, "Unknown argument: %s\n", argv[i]);
         print_usage(argv[0]);
+        std::exit(1);
+    }
+}
+
+std::vector<uint32_t> read_prepacked_file(std::string const& path, size_t bytes)
+{
+    std::vector<uint32_t> data(bytes / sizeof(uint32_t));
+    std::ifstream in(path, std::ios::binary);
+    if (!in)
+    {
+        std::fprintf(stderr, "Failed to open offline prepack file: %s\n", path.c_str());
+        std::exit(1);
+    }
+    in.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(bytes));
+    if (in.gcount() != static_cast<std::streamsize>(bytes))
+    {
+        std::fprintf(stderr, "Offline prepack file has wrong size: %s expected=%zu read=%lld\n", path.c_str(), bytes,
+            static_cast<long long>(in.gcount()));
+        std::exit(1);
+    }
+    return data;
+}
+
+void write_prepacked_file(std::string const& path, uint32_t const* data, size_t bytes)
+{
+    std::ofstream out(path, std::ios::binary);
+    if (!out)
+    {
+        std::fprintf(stderr, "Failed to create prepacked file: %s\n", path.c_str());
+        std::exit(1);
+    }
+    out.write(reinterpret_cast<char const*>(data), static_cast<std::streamsize>(bytes));
+    if (!out)
+    {
+        std::fprintf(stderr, "Failed to write prepacked file: %s\n", path.c_str());
         std::exit(1);
     }
 }
@@ -170,6 +243,19 @@ void run_case(Args const& args)
     std::printf("m=%d n=%d k=%d group_size=%d act=%s quant=%s\n", args.m, args.n, args.k, args.group_size,
         args.act.c_str(), args.quant.c_str());
     std::printf("selected schedule: %s\n", schedule.name);
+    bool const offline_prepack = !args.offline_prepack_path.empty();
+    if (offline_prepack)
+    {
+        std::printf("offline_prepack: loading %s\n", args.offline_prepack_path.c_str());
+    }
+    if (!args.save_prepacked_path.empty())
+    {
+        std::printf("save_prepacked: writing %s\n", args.save_prepacked_path.c_str());
+    }
+    if (args.profile_gemm_only)
+    {
+        std::printf("profile_gemm_only: cudaProfilerStart/Stop wraps timed GEMM loop\n");
+    }
 
     std::vector<Element> h_a(static_cast<size_t>(args.m) * args.k);
     std::vector<Element> h_scales(static_cast<size_t>(args.k / group_size) * args.n);
@@ -202,44 +288,70 @@ void run_case(Args const& args)
     check_cuda(cudaMalloc(&d_scales, scales_bytes), "cudaMalloc d_scales");
     check_cuda(cudaMalloc(&d_zeros, scales_bytes), "cudaMalloc d_zeros");
     check_cuda(cudaMalloc(&d_out, out_bytes), "cudaMalloc d_out");
-    check_cuda(cudaMalloc(&d_b_raw, b_bytes), "cudaMalloc d_b_raw");
+    if (!offline_prepack)
+    {
+        check_cuda(cudaMalloc(&d_b_raw, b_bytes), "cudaMalloc d_b_raw");
+    }
     check_cuda(cudaMalloc(&d_b_prepacked, b_bytes), "cudaMalloc d_b_prepacked");
     check_cuda(cudaMemcpy(d_a, h_a.data(), a_bytes, cudaMemcpyHostToDevice), "cudaMemcpy d_a");
     check_cuda(cudaMemcpy(d_scales, h_scales.data(), scales_bytes, cudaMemcpyHostToDevice), "cudaMemcpy d_scales");
     check_cuda(cudaMemcpy(d_zeros, h_zeros.data(), scales_bytes, cudaMemcpyHostToDevice), "cudaMemcpy d_zeros");
-    check_cuda(cudaMemcpy(d_b_raw, h_b.data(), b_bytes, cudaMemcpyHostToDevice), "cudaMemcpy d_b_raw");
+    if (offline_prepack)
+    {
+        std::vector<uint32_t> h_b_prepacked = read_prepacked_file(args.offline_prepack_path, b_bytes);
+        check_cuda(cudaMemcpy(d_b_prepacked, h_b_prepacked.data(), b_bytes, cudaMemcpyHostToDevice),
+            "cudaMemcpy d_b_prepacked");
+    }
+    else
+    {
+        check_cuda(cudaMemcpy(d_b_raw, h_b.data(), b_bytes, cudaMemcpyHostToDevice), "cudaMemcpy d_b_raw");
+    }
 
     cudaStream_t stream{};
     check_cuda(cudaStreamCreate(&stream), "cudaStreamCreate");
 
-    if constexpr (std::is_same_v<Element, cutlass::half_t>)
+    if (!offline_prepack)
     {
-        if (is_gptq)
+        if constexpr (std::is_same_v<Element, cutlass::half_t>)
         {
-            prepack_B_fp16_u4b8(stream, reinterpret_cast<cutlass::vllm_uint4b8_t const*>(d_b_raw),
-                reinterpret_cast<cutlass::vllm_uint4b8_t*>(d_b_prepacked), args.k, args.n);
+            if (is_gptq)
+            {
+                prepack_B_fp16_u4b8(stream, reinterpret_cast<cutlass::vllm_uint4b8_t const*>(d_b_raw),
+                    reinterpret_cast<cutlass::vllm_uint4b8_t*>(d_b_prepacked), args.k, args.n);
+            }
+            else
+            {
+                prepack_B_fp16_u4(stream, reinterpret_cast<cutlass::uint4b_t const*>(d_b_raw),
+                    reinterpret_cast<cutlass::uint4b_t*>(d_b_prepacked), args.k, args.n);
+            }
         }
         else
         {
-            prepack_B_fp16_u4(stream, reinterpret_cast<cutlass::uint4b_t const*>(d_b_raw),
-                reinterpret_cast<cutlass::uint4b_t*>(d_b_prepacked), args.k, args.n);
+            if (is_gptq)
+            {
+                prepack_B_bf16_u4b8(stream, reinterpret_cast<cutlass::vllm_uint4b8_t const*>(d_b_raw),
+                    reinterpret_cast<cutlass::vllm_uint4b8_t*>(d_b_prepacked), args.k, args.n);
+            }
+            else
+            {
+                prepack_B_bf16_u4(stream, reinterpret_cast<cutlass::uint4b_t const*>(d_b_raw),
+                    reinterpret_cast<cutlass::uint4b_t*>(d_b_prepacked), args.k, args.n);
+            }
+        }
+        check_cuda(cudaGetLastError(), "prepack launch");
+        check_cuda(cudaStreamSynchronize(stream), "prepack sync");
+        if (!args.save_prepacked_path.empty())
+        {
+            std::vector<uint32_t> h_b_prepacked(h_b.size());
+            check_cuda(cudaMemcpy(h_b_prepacked.data(), d_b_prepacked, b_bytes, cudaMemcpyDeviceToHost),
+                "cudaMemcpy save prepacked");
+            write_prepacked_file(args.save_prepacked_path, h_b_prepacked.data(), b_bytes);
         }
     }
     else
     {
-        if (is_gptq)
-        {
-            prepack_B_bf16_u4b8(stream, reinterpret_cast<cutlass::vllm_uint4b8_t const*>(d_b_raw),
-                reinterpret_cast<cutlass::vllm_uint4b8_t*>(d_b_prepacked), args.k, args.n);
-        }
-        else
-        {
-            prepack_B_bf16_u4(stream, reinterpret_cast<cutlass::uint4b_t const*>(d_b_raw),
-                reinterpret_cast<cutlass::uint4b_t*>(d_b_prepacked), args.k, args.n);
-        }
+        check_cuda(cudaGetLastError(), "offline prepack");
     }
-    check_cuda(cudaGetLastError(), "prepack launch");
-    check_cuda(cudaStreamSynchronize(stream), "prepack sync");
 
     size_t workspace_bytes = 0;
     if constexpr (std::is_same_v<Element, cutlass::half_t>)
@@ -312,6 +424,11 @@ void run_case(Args const& args)
     {
         launch();
     }
+    if (args.profile_gemm_only)
+    {
+        check_cuda(cudaStreamSynchronize(stream), "profile pre-sync");
+        check_cuda(cudaProfilerStart(), "cudaProfilerStart");
+    }
     cudaEvent_t start{};
     cudaEvent_t stop{};
     check_cuda(cudaEventCreate(&start), "cudaEventCreate start");
@@ -323,18 +440,31 @@ void run_case(Args const& args)
     }
     check_cuda(cudaEventRecord(stop, stream), "cudaEventRecord stop");
     check_cuda(cudaEventSynchronize(stop), "cudaEventSynchronize stop");
+    if (args.profile_gemm_only)
+    {
+        check_cuda(cudaProfilerStop(), "cudaProfilerStop");
+    }
     float ms = 0.0f;
     check_cuda(cudaEventElapsedTime(&ms, start, stop), "cudaEventElapsedTime");
-    check_cuda(cudaMemcpy(h_out.data(), d_out, out_bytes, cudaMemcpyDeviceToHost), "cudaMemcpy d_out");
+    if (!args.no_checksum)
+    {
+        check_cuda(cudaMemcpy(h_out.data(), d_out, out_bytes, cudaMemcpyDeviceToHost), "cudaMemcpy d_out");
+    }
 
     double checksum = 0.0;
-    for (size_t i = 0; i < std::min<size_t>(h_out.size(), 1024); ++i)
+    if (!args.no_checksum)
     {
-        checksum += to_float(h_out[i]);
+        for (size_t i = 0; i < std::min<size_t>(h_out.size(), 1024); ++i)
+        {
+            checksum += to_float(h_out[i]);
+        }
     }
     double const flops = 2.0 * double(args.m) * args.n * args.k;
     double const avg_us = double(ms) * 1000.0 / args.iters;
-    std::printf("checksum=%f\n", checksum);
+    if (!args.no_checksum)
+    {
+        std::printf("checksum=%f\n", checksum);
+    }
     std::printf("Avg kernel time: %.3f us (%.1f TFLOPS, %d iters, %d warmup)\n", avg_us, flops / (avg_us * 1e-6) / 1e12,
         args.iters, args.warmup);
 
@@ -349,7 +479,10 @@ void run_case(Args const& args)
     check_cuda(cudaFree(d_scales), "cudaFree d_scales");
     check_cuda(cudaFree(d_zeros), "cudaFree d_zeros");
     check_cuda(cudaFree(d_out), "cudaFree d_out");
-    check_cuda(cudaFree(d_b_raw), "cudaFree d_b_raw");
+    if (d_b_raw)
+    {
+        check_cuda(cudaFree(d_b_raw), "cudaFree d_b_raw");
+    }
     check_cuda(cudaFree(d_b_prepacked), "cudaFree d_b_prepacked");
 }
 

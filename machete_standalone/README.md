@@ -96,6 +96,40 @@ machete_standalone/build_cmake_release/test_machete_gemm \
   --schedule=128x32_2x1x1_TmaMI_TmaCoop_streamK
 ```
 
+Save a Machete-prepacked weight file once:
+
+```
+machete_standalone/build_cmake_release/test_machete_gemm \
+  --m=4096 --n=4096 --k=4096 --group_size=128 \
+  --act=fp16 --quant=gptq_u4b8 \
+  --save_prepacked=/tmp/machete_b_4096x4096_fp16_gptq_u4b8.bin \
+  --warmup=1 --iters=1
+```
+
+Run later with the weight already prepacked offline. This skips the runtime GPU
+prepack kernel:
+
+```
+machete_standalone/build_cmake_release/test_machete_gemm \
+  --m=4096 --n=4096 --k=4096 --group_size=128 \
+  --act=fp16 --quant=gptq_u4b8 \
+  --offline_prepack=/tmp/machete_b_4096x4096_fp16_gptq_u4b8.bin \
+  --warmup=0 --iters=1
+```
+
+For profiler captures focused only on the timed GEMM loop, use CUDA profiler
+range capture:
+
+```
+nsys profile -t cuda,nvtx --capture-range=cudaProfilerApi \
+  --capture-range-end=stop -f true -o /tmp/machete_gemm_only \
+  machete_standalone/build_cmake_release/test_machete_gemm \
+    --m=4096 --n=4096 --k=4096 --group_size=128 \
+    --act=fp16 --quant=gptq_u4b8 \
+    --offline_prepack=/tmp/machete_b_4096x4096_fp16_gptq_u4b8.bin \
+    --profile_gemm_only --no_checksum --warmup=0 --iters=1
+```
+
 Run all schedules:
 
 ```
