@@ -11,6 +11,9 @@ Included projects
 - `moe_w4a16_standalone/`: TensorRT-LLM extracted MoE W4A16 grouped GEMM
   - FP16/BF16 activations with INT4 weights
   - Standalone tactic caching for Qwen MoE shapes
+- `cutlass55_standalone/`: standalone CUTLASS example 55 kernel
+  - FP16/BF16 activations with INT4 weights on SM90/SM90a
+  - `--single_kernel` path to launch exactly one target GEMM kernel
 - `homemade_marlin/`: standalone Marlin kernel variants used for performance comparison
   - `MARLIN_USE_CREATEPOLICY=0` by default to avoid `createpolicy` illegal-instruction issues on some setups
 
@@ -30,6 +33,13 @@ cmake -S moe_w4a16_standalone -B moe_w4a16_standalone/build_cmake_release \
   -DCMAKE_BUILD_TYPE=Release
 cmake --build moe_w4a16_standalone/build_cmake_release \
   --target test_moe_w4a16_gemm -j$(nproc)
+
+cmake -S cutlass55_standalone -B cutlass55_standalone/build_cmake_release \
+  -DGPU_ARCH=sm_90a \
+  -DCUTLASS_DIR=$PWD/../../third_party/cutlass \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build cutlass55_standalone/build_cmake_release \
+  --target cutlass55_fp16_gemm cutlass55_bf16_gemm -j$(nproc)
 ```
 
 ## Usage
@@ -62,6 +72,11 @@ fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm --m=2 --n=128 --k=128
 # Single inference, no profiling, no warmup (GPU only runs the GEMM kernel)
 fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm --m=1 --n=12288 --k=3072 --group_size=128 \
     --tactic=tactics.cache --warmup=0 --iters=1
+
+# CUTLASS example 55 standalone: launch exactly one target GEMM kernel
+cutlass55_standalone/build_cmake_release/cutlass55_fp16_gemm \
+    --m=4096 --n=4096 --k=4096 --g=128 \
+    --mode=1 --shuffle=true --single_kernel --profile_gemm_only
 ```
 
 ### Tactic cache
