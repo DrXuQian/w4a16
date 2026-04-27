@@ -34,6 +34,7 @@ if(NOT EXISTS "${CUTLASS_DIR}/include/cutlass/cutlass.h")
 endif()
 
 add_library(machete_gemm STATIC
+    cpp/quantization/machete/cutlass55_backend.cu
     cpp/quantization/machete/machete_standalone_gemm.cu
 )
 set_property(TARGET machete_gemm PROPERTY CUDA_ARCHITECTURES OFF)
@@ -42,6 +43,7 @@ set_property(TARGET machete_gemm PROPERTY CUDA_SEPARABLE_COMPILATION OFF)
 target_include_directories(machete_gemm PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/cpp
     ${CUTLASS_DIR}/include
+    ${CUTLASS_DIR}/tools/util/include
 )
 
 target_compile_definitions(machete_gemm PUBLIC

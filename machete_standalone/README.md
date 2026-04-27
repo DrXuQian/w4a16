@@ -27,6 +27,7 @@ Supported:
   - AWQ-style `u4` with group scales and group zeros
 - vLLM Machete prepack kernel
 - vLLM H100 heuristic schedule selection
+- CUTLASS example-55 mode-1 scale-only backend for comparison
 
 Not included:
 
@@ -34,6 +35,7 @@ Not included:
 - u8/u8b128 kernels
 - channel scales or token scales
 - SM80/SM100+ specializations
+- CUTLASS example-55 mode 0 or mode 2 through the Machete test binary
 
 Build
 -----
@@ -70,6 +72,18 @@ Default run, using heuristic schedule selection:
 machete_standalone/build_cmake_release/test_machete_gemm \
   --m=4096 --n=4096 --k=4096 --group_size=128 \
   --act=fp16 --quant=gptq_u4b8 \
+  --warmup=100 --iters=1000
+```
+
+CUTLASS example-55 backend inside the same test binary. This path supports
+mode 1 only: signed INT4 weights with group scales, `TileShape=128x128x64`,
+`ClusterShape=1x1x1`, and the example-55 value shuffle layout.
+
+```
+machete_standalone/build_cmake_release/test_machete_gemm \
+  --backend=cutlass55 \
+  --m=4096 --n=4096 --k=4096 --group_size=128 \
+  --act=fp16 --quant=cutlass_s4 \
   --warmup=100 --iters=1000
 ```
 
@@ -118,8 +132,9 @@ machete_standalone/build_cmake_release/test_machete_gemm \
 ```
 
 For performance-only profiling where the actual B contents do not matter, omit
-the path. The test allocates the prepacked B device buffer directly and does not
-run runtime prepack, file IO, or a B H2D copy:
+the path. The test creates deterministic nonzero prepacked data in host code and
+copies it to the device before timing. This does not run runtime prepack or file
+IO, and avoids the unrealistic all-zero/unwritten-buffer timing path:
 
 ```
 machete_standalone/build_cmake_release/test_machete_gemm \
@@ -139,6 +154,13 @@ nsys profile -t cuda,nvtx --capture-range=cudaProfilerApi \
     --act=fp16 --quant=gptq_u4b8 \
     --offline_prepack \
     --profile_gemm_only --no_checksum --warmup=0 --iters=1
+```
+
+Summarize the captured GPU kernels:
+
+```
+nsys stats --report cuda_gpu_kern_sum,cuda_gpu_mem_time_sum \
+  /tmp/machete_gemm_only.nsys-rep
 ```
 
 Run all schedules:
@@ -176,15 +198,19 @@ machete_standalone/build_cmake_release/test_machete_gemm \
 
 CUTLASS example 55 comparison
 -----------------------------
-For reference, CUTLASS example 55 was measured on the same shape with
-`--g=128 --l=1 --shuffle=true --warmup=100 --iterations=1000`.
+For reference, CUTLASS example 55 FP16 mode 1 was measured on the same shape
+with initialized inputs and offline reorder before timing:
+
+```
+cutlass55_standalone/build_cmake_release/cutlass55_fp16_gemm \
+  --m=4096 --n=4096 --k=4096 --g=128 \
+  --mode=1 --shuffle=true --skip_verify \
+  --warmup=100 --iterations=1000
+```
 
 | Kernel | Mode | Avg time (us) | Effective TFLOPS |
 |---|---|---:|---:|
-| example 55 BF16 | mode 1, group scale | 438.524 | 313.4 |
-| example 55 BF16 | mode 2, group scale + zero | 470.285 | 292.2 |
-| example 55 FP16 | mode 1, group scale | 439.630 | 312.6 |
-| example 55 FP16 | mode 2, group scale + zero | 477.292 | 288.0 |
+| example 55 FP16 | mode 1, group scale | 353.483 | 388.8 |
 
 Machete and example 55 do not use the same kernel even when both have a
 `128x128x64` threadblock tile:
@@ -203,6 +229,55 @@ Machete and example 55 do not use the same kernel even when both have a
   feed the decompressed weight operand through the GMMA register-sourced side.
   This changes the memory layout and schedule interpretation relative to the
   example 55 benchmark.
+
+CUTLASS55 backend inside Machete test binary
+--------------------------------------------
+The `--backend=cutlass55` path embeds the example-55 mode-1 kernel in the
+Machete standalone test binary without changing the original Machete backend.
+It initializes the CUTLASS adapter once before timing; the timed loop only calls
+`gemm.run()`.
+
+Commands:
+
+```
+machete_standalone/build_cmake_release/test_machete_gemm \
+  --backend=cutlass55 \
+  --m=4096 --n=4096 --k=4096 --group_size=128 \
+  --act=fp16 --quant=cutlass_s4 \
+  --offline_prepack --no_checksum --warmup=100 --iters=1000
+```
+
+```
+machete_standalone/build_cmake_release/test_machete_gemm \
+  --backend=machete \
+  --m=4096 --n=4096 --k=4096 --group_size=128 \
+  --act=fp16 --quant=gptq_u4b8 \
+  --offline_prepack --no_checksum --warmup=100 --iters=1000
+```
+
+Event-time measurements on H800 PCIe:
+
+| Backend | Data path | Avg time (us) | Effective TFLOPS |
+|---|---|---:|---:|
+| Machete | synthetic prepacked data | 356.764 | 385.2 |
+| CUTLASS55 in Machete binary | synthetic prepacked data | 343.894 | 399.7 |
+| CUTLASS55 in Machete binary | runtime reorder before timing | 351.957 | 390.5 |
+| CUTLASS55 standalone | initialized + reorder before timing | 353.483 | 388.8 |
+
+`nsys` GPU-kernel summaries with `--profile_gemm_only --warmup=0 --iters=10`
+show that the captured range contains only the target GEMM kernel and no GPU
+memcpy/memset. These are kernel durations, not CUDA event elapsed time across
+the host submission loop:
+
+| Binary/backend | GPU kernels | Avg kernel time (us) |
+|---|---:|---:|
+| Machete backend | 10 | 298.246 |
+| CUTLASS55 in Machete binary | 10 | 302.873 |
+| CUTLASS55 standalone, initialized + reorder before timing | 10 | 300.853 |
+
+Do not compare against `cutlass55_standalone --skip_setup_kernels` as a final
+number. That path leaves the weight and scale buffers uninitialized, and on this
+machine it reports a much faster but unrealistic kernel time.
 
 Heuristic
 ---------

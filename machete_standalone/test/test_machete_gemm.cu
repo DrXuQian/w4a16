@@ -1,3 +1,4 @@
+#include "quantization/machete/cutlass55_backend.cuh"
 #include "quantization/machete/machete_standalone_gemm.cuh"
 
 #include <cuda_profiler_api.h>
@@ -29,6 +30,7 @@ struct Args
     bool no_checksum = false;
     bool offline_prepack = false;
     bool profile_gemm_only = false;
+    std::string backend = "machete";
     std::string schedule;
     std::string act = "fp16";
     std::string quant = "gptq_u4b8";
@@ -50,7 +52,8 @@ bool parse_int(char const* arg, char const* key, int& out)
 void print_usage(char const* name)
 {
     std::printf("Usage: %s [--m=N] [--n=N] [--k=N] [--group_size=N|-1] [--warmup=N] [--iters=N] "
-                "[--act=fp16|bf16] [--quant=gptq_u4b8|awq_u4] [--schedule=<name>] "
+                "[--backend=machete|cutlass55] [--act=fp16|bf16] [--quant=gptq_u4b8|awq_u4|cutlass_s4] "
+                "[--schedule=<name>] "
                 "[--save_prepacked=PATH] [--offline_prepack[=PATH]] [--profile_gemm_only] [--no_checksum] "
                 "[--list_schedules]\n",
         name);
@@ -74,6 +77,11 @@ void parse_args(int argc, char** argv, Args& args)
         if (std::strncmp(argv[i], "--schedule=", 11) == 0)
         {
             args.schedule = argv[i] + 11;
+            continue;
+        }
+        if (std::strncmp(argv[i], "--backend=", 10) == 0)
+        {
+            args.backend = argv[i] + 10;
             continue;
         }
         if (std::strncmp(argv[i], "--act=", 6) == 0)
@@ -212,17 +220,39 @@ std::vector<uint32_t> make_packed_u4b8_col_major(int k, int n)
     return packed;
 }
 
+std::vector<uint32_t> make_synthetic_prepacked_words(size_t words)
+{
+    std::vector<uint32_t> packed(words);
+    uint32_t state = 0x6d2b79f5u;
+    for (size_t i = 0; i < words; ++i)
+    {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        packed[i] = state;
+    }
+    return packed;
+}
+
 template <typename Element>
 void run_case(Args const& args)
 {
     using namespace machete_standalone;
 
+    bool const is_cutlass55 = args.backend == "cutlass55";
+    bool const is_machete = args.backend == "machete";
+    if (!is_cutlass55 && !is_machete)
+    {
+        std::fprintf(stderr, "Unsupported --backend=%s\n", args.backend.c_str());
+        std::exit(1);
+    }
+
     MacheteSchedule schedule{};
-    if (args.schedule.empty())
+    if (!is_cutlass55 && args.schedule.empty())
     {
         schedule = select_schedule(args.m, args.n, args.k);
     }
-    else
+    else if (!is_cutlass55)
     {
         auto parsed = schedule_from_name(args.schedule);
         if (!parsed)
@@ -242,15 +272,31 @@ void run_case(Args const& args)
 
     bool const is_gptq = args.quant == "gptq_u4b8";
     bool const is_awq = args.quant == "awq_u4";
-    if (!is_gptq && !is_awq)
+    bool const is_cutlass_s4 = args.quant == "cutlass_s4";
+    if (is_cutlass55)
+    {
+        if (!is_gptq && !is_cutlass_s4)
+        {
+            std::fprintf(stderr, "CUTLASS55 backend only supports scale-only signed int4. Use --quant=cutlass_s4 or omit --quant.\n");
+            std::exit(1);
+        }
+    }
+    else if (!is_gptq && !is_awq)
     {
         std::fprintf(stderr, "Unsupported --quant=%s\n", args.quant.c_str());
         std::exit(1);
     }
 
-    std::printf("m=%d n=%d k=%d group_size=%d act=%s quant=%s\n", args.m, args.n, args.k, args.group_size,
-        args.act.c_str(), args.quant.c_str());
-    std::printf("selected schedule: %s\n", schedule.name);
+    std::printf("m=%d n=%d k=%d group_size=%d backend=%s act=%s quant=%s\n", args.m, args.n, args.k, args.group_size,
+        args.backend.c_str(), args.act.c_str(), is_cutlass55 ? "cutlass_s4" : args.quant.c_str());
+    if (is_cutlass55)
+    {
+        std::printf("selected backend config: cutlass55 mode1 scale-only 128x128x64 cluster=1x1x1\n");
+    }
+    else
+    {
+        std::printf("selected schedule: %s\n", schedule.name);
+    }
     bool const offline_prepack_from_file = args.offline_prepack && !args.offline_prepack_path.empty();
     bool const offline_prepack_synthetic = args.offline_prepack && args.offline_prepack_path.empty();
     if (offline_prepack_from_file)
@@ -259,7 +305,7 @@ void run_case(Args const& args)
     }
     if (offline_prepack_synthetic)
     {
-        std::printf("offline_prepack: synthetic device buffer; no runtime prepack, file IO, or B H2D copy\n");
+        std::printf("offline_prepack: synthetic prepacked data; no runtime prepack or file IO\n");
     }
     if (!args.save_prepacked_path.empty())
     {
@@ -274,9 +320,18 @@ void run_case(Args const& args)
     std::vector<Element> h_scales(static_cast<size_t>(args.k / group_size) * args.n);
     std::vector<Element> h_zeros(static_cast<size_t>(args.k / group_size) * args.n);
     std::vector<Element> h_out(static_cast<size_t>(args.m) * args.n);
+    std::vector<Element> h_c;
+    if (is_cutlass55)
+    {
+        h_c.resize(static_cast<size_t>(args.m) * args.n);
+    }
     for (size_t i = 0; i < h_a.size(); ++i)
     {
         h_a[i] = make_value<Element>(i, 0.01f);
+    }
+    for (size_t i = 0; i < h_c.size(); ++i)
+    {
+        h_c[i] = make_value<Element>(i, 0.01f);
     }
     for (size_t i = 0; i < h_scales.size(); ++i)
     {
@@ -294,18 +349,24 @@ void run_case(Args const& args)
     Element* d_a = nullptr;
     Element* d_scales = nullptr;
     Element* d_zeros = nullptr;
+    Element* d_c = nullptr;
     Element* d_out = nullptr;
     uint32_t* d_b_raw = nullptr;
     uint32_t* d_b_prepacked = nullptr;
 
     size_t const a_bytes = h_a.size() * sizeof(Element);
     size_t const scales_bytes = h_scales.size() * sizeof(Element);
+    size_t const c_bytes = h_c.size() * sizeof(Element);
     size_t const out_bytes = h_out.size() * sizeof(Element);
     size_t const b_bytes = b_words * sizeof(uint32_t);
 
     check_cuda(cudaMalloc(&d_a, a_bytes), "cudaMalloc d_a");
     check_cuda(cudaMalloc(&d_scales, scales_bytes), "cudaMalloc d_scales");
     check_cuda(cudaMalloc(&d_zeros, scales_bytes), "cudaMalloc d_zeros");
+    if (is_cutlass55)
+    {
+        check_cuda(cudaMalloc(&d_c, c_bytes), "cudaMalloc d_c");
+    }
     check_cuda(cudaMalloc(&d_out, out_bytes), "cudaMalloc d_out");
     if (!args.offline_prepack)
     {
@@ -315,11 +376,21 @@ void run_case(Args const& args)
     check_cuda(cudaMemcpy(d_a, h_a.data(), a_bytes, cudaMemcpyHostToDevice), "cudaMemcpy d_a");
     check_cuda(cudaMemcpy(d_scales, h_scales.data(), scales_bytes, cudaMemcpyHostToDevice), "cudaMemcpy d_scales");
     check_cuda(cudaMemcpy(d_zeros, h_zeros.data(), scales_bytes, cudaMemcpyHostToDevice), "cudaMemcpy d_zeros");
+    if (is_cutlass55)
+    {
+        check_cuda(cudaMemcpy(d_c, h_c.data(), c_bytes, cudaMemcpyHostToDevice), "cudaMemcpy d_c");
+    }
     if (offline_prepack_from_file)
     {
         std::vector<uint32_t> h_b_prepacked = read_prepacked_file(args.offline_prepack_path, b_bytes);
         check_cuda(cudaMemcpy(d_b_prepacked, h_b_prepacked.data(), b_bytes, cudaMemcpyHostToDevice),
             "cudaMemcpy d_b_prepacked");
+    }
+    else if (offline_prepack_synthetic)
+    {
+        std::vector<uint32_t> h_b_prepacked = make_synthetic_prepacked_words(b_words);
+        check_cuda(cudaMemcpy(d_b_prepacked, h_b_prepacked.data(), b_bytes, cudaMemcpyHostToDevice),
+            "cudaMemcpy synthetic d_b_prepacked");
     }
     else if (!args.offline_prepack)
     {
@@ -331,34 +402,50 @@ void run_case(Args const& args)
 
     if (!args.offline_prepack)
     {
-        if constexpr (std::is_same_v<Element, cutlass::half_t>)
+        if (is_cutlass55)
         {
-            if (is_gptq)
+            if constexpr (std::is_same_v<Element, cutlass::half_t>)
             {
-                prepack_B_fp16_u4b8(stream, reinterpret_cast<cutlass::vllm_uint4b8_t const*>(d_b_raw),
-                    reinterpret_cast<cutlass::vllm_uint4b8_t*>(d_b_prepacked), args.k, args.n);
+                cutlass55_reorder_B_fp16_s4(stream, reinterpret_cast<cutlass::int4b_t const*>(d_b_raw),
+                    reinterpret_cast<cutlass::int4b_t*>(d_b_prepacked), args.k, args.n);
             }
             else
             {
-                prepack_B_fp16_u4(stream, reinterpret_cast<cutlass::uint4b_t const*>(d_b_raw),
-                    reinterpret_cast<cutlass::uint4b_t*>(d_b_prepacked), args.k, args.n);
+                cutlass55_reorder_B_bf16_s4(stream, reinterpret_cast<cutlass::int4b_t const*>(d_b_raw),
+                    reinterpret_cast<cutlass::int4b_t*>(d_b_prepacked), args.k, args.n);
             }
         }
         else
         {
-            if (is_gptq)
+            if constexpr (std::is_same_v<Element, cutlass::half_t>)
             {
-                prepack_B_bf16_u4b8(stream, reinterpret_cast<cutlass::vllm_uint4b8_t const*>(d_b_raw),
-                    reinterpret_cast<cutlass::vllm_uint4b8_t*>(d_b_prepacked), args.k, args.n);
+                if (is_gptq)
+                {
+                    prepack_B_fp16_u4b8(stream, reinterpret_cast<cutlass::vllm_uint4b8_t const*>(d_b_raw),
+                        reinterpret_cast<cutlass::vllm_uint4b8_t*>(d_b_prepacked), args.k, args.n);
+                }
+                else
+                {
+                    prepack_B_fp16_u4(stream, reinterpret_cast<cutlass::uint4b_t const*>(d_b_raw),
+                        reinterpret_cast<cutlass::uint4b_t*>(d_b_prepacked), args.k, args.n);
+                }
             }
             else
             {
-                prepack_B_bf16_u4(stream, reinterpret_cast<cutlass::uint4b_t const*>(d_b_raw),
-                    reinterpret_cast<cutlass::uint4b_t*>(d_b_prepacked), args.k, args.n);
+                if (is_gptq)
+                {
+                    prepack_B_bf16_u4b8(stream, reinterpret_cast<cutlass::vllm_uint4b8_t const*>(d_b_raw),
+                        reinterpret_cast<cutlass::vllm_uint4b8_t*>(d_b_prepacked), args.k, args.n);
+                }
+                else
+                {
+                    prepack_B_bf16_u4(stream, reinterpret_cast<cutlass::uint4b_t const*>(d_b_raw),
+                        reinterpret_cast<cutlass::uint4b_t*>(d_b_prepacked), args.k, args.n);
+                }
             }
         }
-        check_cuda(cudaGetLastError(), "prepack launch");
-        check_cuda(cudaStreamSynchronize(stream), "prepack sync");
+        check_cuda(cudaGetLastError(), is_cutlass55 ? "cutlass55 reorder launch" : "prepack launch");
+        check_cuda(cudaStreamSynchronize(stream), is_cutlass55 ? "cutlass55 reorder sync" : "prepack sync");
         if (!args.save_prepacked_path.empty())
         {
             std::vector<uint32_t> h_b_prepacked(b_words);
@@ -375,7 +462,13 @@ void run_case(Args const& args)
     size_t workspace_bytes = 0;
     if constexpr (std::is_same_v<Element, cutlass::half_t>)
     {
-        if (is_gptq)
+        if (is_cutlass55)
+        {
+            workspace_bytes = cutlass55_get_workspace_size_fp16_s4(d_a,
+                reinterpret_cast<cutlass::int4b_t const*>(d_b_prepacked), d_scales, d_c, d_out, args.m, args.n,
+                args.k, args.group_size);
+        }
+        else if (is_gptq)
         {
             workspace_bytes = machete_get_workspace_size_fp16_u4b8(d_a,
                 reinterpret_cast<cutlass::vllm_uint4b8_t const*>(d_b_prepacked), d_scales, d_out, args.m, args.n,
@@ -390,7 +483,13 @@ void run_case(Args const& args)
     }
     else
     {
-        if (is_gptq)
+        if (is_cutlass55)
+        {
+            workspace_bytes = cutlass55_get_workspace_size_bf16_s4(d_a,
+                reinterpret_cast<cutlass::int4b_t const*>(d_b_prepacked), d_scales, d_c, d_out, args.m, args.n,
+                args.k, args.group_size);
+        }
+        else if (is_gptq)
         {
             workspace_bytes = machete_get_workspace_size_bf16_u4b8(d_a,
                 reinterpret_cast<cutlass::vllm_uint4b8_t const*>(d_b_prepacked), d_scales, d_out, args.m, args.n,
@@ -410,10 +509,31 @@ void run_case(Args const& args)
     }
     std::printf("workspace bytes: %zu\n", workspace_bytes);
 
+    Cutlass55Plan* cutlass55_plan = nullptr;
+    if (is_cutlass55)
+    {
+        if constexpr (std::is_same_v<Element, cutlass::half_t>)
+        {
+            cutlass55_plan = cutlass55_create_plan_fp16_s4(stream, d_a,
+                reinterpret_cast<cutlass::int4b_t const*>(d_b_prepacked), d_scales, d_c, d_out, args.m, args.n,
+                args.k, args.group_size, d_workspace, workspace_bytes);
+        }
+        else
+        {
+            cutlass55_plan = cutlass55_create_plan_bf16_s4(stream, d_a,
+                reinterpret_cast<cutlass::int4b_t const*>(d_b_prepacked), d_scales, d_c, d_out, args.m, args.n,
+                args.k, args.group_size, d_workspace, workspace_bytes);
+        }
+    }
+
     auto launch = [&]() {
         if constexpr (std::is_same_v<Element, cutlass::half_t>)
         {
-            if (is_gptq)
+            if (is_cutlass55)
+            {
+                cutlass55_run_plan(cutlass55_plan, stream);
+            }
+            else if (is_gptq)
             {
                 machete_mm_fp16_u4b8(stream, d_a, reinterpret_cast<cutlass::vllm_uint4b8_t const*>(d_b_prepacked),
                     d_scales, d_out, args.m, args.n, args.k, args.group_size, schedule, d_workspace, workspace_bytes);
@@ -426,7 +546,11 @@ void run_case(Args const& args)
         }
         else
         {
-            if (is_gptq)
+            if (is_cutlass55)
+            {
+                cutlass55_run_plan(cutlass55_plan, stream);
+            }
+            else if (is_gptq)
             {
                 machete_mm_bf16_u4b8(stream, d_a, reinterpret_cast<cutlass::vllm_uint4b8_t const*>(d_b_prepacked),
                     d_scales, d_out, args.m, args.n, args.k, args.group_size, schedule, d_workspace, workspace_bytes);
@@ -489,6 +613,7 @@ void run_case(Args const& args)
 
     check_cuda(cudaEventDestroy(start), "cudaEventDestroy start");
     check_cuda(cudaEventDestroy(stop), "cudaEventDestroy stop");
+    cutlass55_destroy_plan(cutlass55_plan);
     check_cuda(cudaStreamDestroy(stream), "cudaStreamDestroy");
     if (d_workspace)
     {
@@ -497,6 +622,10 @@ void run_case(Args const& args)
     check_cuda(cudaFree(d_a), "cudaFree d_a");
     check_cuda(cudaFree(d_scales), "cudaFree d_scales");
     check_cuda(cudaFree(d_zeros), "cudaFree d_zeros");
+    if (d_c)
+    {
+        check_cuda(cudaFree(d_c), "cudaFree d_c");
+    }
     check_cuda(cudaFree(d_out), "cudaFree d_out");
     if (d_b_raw)
     {
