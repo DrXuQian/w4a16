@@ -27,6 +27,7 @@ struct Args
     int iters = 100;
     bool list_schedules = false;
     bool no_checksum = false;
+    bool offline_prepack = false;
     bool profile_gemm_only = false;
     std::string schedule;
     std::string act = "fp16";
@@ -50,7 +51,7 @@ void print_usage(char const* name)
 {
     std::printf("Usage: %s [--m=N] [--n=N] [--k=N] [--group_size=N|-1] [--warmup=N] [--iters=N] "
                 "[--act=fp16|bf16] [--quant=gptq_u4b8|awq_u4] [--schedule=<name>] "
-                "[--save_prepacked=PATH] [--offline_prepack=PATH] [--profile_gemm_only] [--no_checksum] "
+                "[--save_prepacked=PATH] [--offline_prepack[=PATH]] [--profile_gemm_only] [--no_checksum] "
                 "[--list_schedules]\n",
         name);
 }
@@ -102,12 +103,19 @@ void parse_args(int argc, char** argv, Args& args)
         }
         if (std::strncmp(argv[i], "--offline_prepack=", 18) == 0)
         {
+            args.offline_prepack = true;
             args.offline_prepack_path = argv[i] + 18;
             continue;
         }
         if (std::strncmp(argv[i], "--offline-prepack=", 18) == 0)
         {
+            args.offline_prepack = true;
             args.offline_prepack_path = argv[i] + 18;
+            continue;
+        }
+        if (std::strcmp(argv[i], "--offline_prepack") == 0 || std::strcmp(argv[i], "--offline-prepack") == 0)
+        {
+            args.offline_prepack = true;
             continue;
         }
         if (std::strncmp(argv[i], "--save_prepacked=", 17) == 0)
@@ -243,10 +251,15 @@ void run_case(Args const& args)
     std::printf("m=%d n=%d k=%d group_size=%d act=%s quant=%s\n", args.m, args.n, args.k, args.group_size,
         args.act.c_str(), args.quant.c_str());
     std::printf("selected schedule: %s\n", schedule.name);
-    bool const offline_prepack = !args.offline_prepack_path.empty();
-    if (offline_prepack)
+    bool const offline_prepack_from_file = args.offline_prepack && !args.offline_prepack_path.empty();
+    bool const offline_prepack_synthetic = args.offline_prepack && args.offline_prepack_path.empty();
+    if (offline_prepack_from_file)
     {
         std::printf("offline_prepack: loading %s\n", args.offline_prepack_path.c_str());
+    }
+    if (offline_prepack_synthetic)
+    {
+        std::printf("offline_prepack: synthetic device buffer; no runtime prepack, file IO, or B H2D copy\n");
     }
     if (!args.save_prepacked_path.empty())
     {
@@ -270,7 +283,13 @@ void run_case(Args const& args)
         h_scales[i] = make_value<Element>(i, 0.001f);
         h_zeros[i] = make_value<Element>(i, 0.01f);
     }
-    std::vector<uint32_t> h_b = make_packed_u4b8_col_major(args.k, args.n);
+    int constexpr weight_pack = 8;
+    size_t const b_words = static_cast<size_t>(args.k / weight_pack) * args.n;
+    std::vector<uint32_t> h_b;
+    if (!args.offline_prepack)
+    {
+        h_b = make_packed_u4b8_col_major(args.k, args.n);
+    }
 
     Element* d_a = nullptr;
     Element* d_scales = nullptr;
@@ -282,13 +301,13 @@ void run_case(Args const& args)
     size_t const a_bytes = h_a.size() * sizeof(Element);
     size_t const scales_bytes = h_scales.size() * sizeof(Element);
     size_t const out_bytes = h_out.size() * sizeof(Element);
-    size_t const b_bytes = h_b.size() * sizeof(uint32_t);
+    size_t const b_bytes = b_words * sizeof(uint32_t);
 
     check_cuda(cudaMalloc(&d_a, a_bytes), "cudaMalloc d_a");
     check_cuda(cudaMalloc(&d_scales, scales_bytes), "cudaMalloc d_scales");
     check_cuda(cudaMalloc(&d_zeros, scales_bytes), "cudaMalloc d_zeros");
     check_cuda(cudaMalloc(&d_out, out_bytes), "cudaMalloc d_out");
-    if (!offline_prepack)
+    if (!args.offline_prepack)
     {
         check_cuda(cudaMalloc(&d_b_raw, b_bytes), "cudaMalloc d_b_raw");
     }
@@ -296,13 +315,13 @@ void run_case(Args const& args)
     check_cuda(cudaMemcpy(d_a, h_a.data(), a_bytes, cudaMemcpyHostToDevice), "cudaMemcpy d_a");
     check_cuda(cudaMemcpy(d_scales, h_scales.data(), scales_bytes, cudaMemcpyHostToDevice), "cudaMemcpy d_scales");
     check_cuda(cudaMemcpy(d_zeros, h_zeros.data(), scales_bytes, cudaMemcpyHostToDevice), "cudaMemcpy d_zeros");
-    if (offline_prepack)
+    if (offline_prepack_from_file)
     {
         std::vector<uint32_t> h_b_prepacked = read_prepacked_file(args.offline_prepack_path, b_bytes);
         check_cuda(cudaMemcpy(d_b_prepacked, h_b_prepacked.data(), b_bytes, cudaMemcpyHostToDevice),
             "cudaMemcpy d_b_prepacked");
     }
-    else
+    else if (!args.offline_prepack)
     {
         check_cuda(cudaMemcpy(d_b_raw, h_b.data(), b_bytes, cudaMemcpyHostToDevice), "cudaMemcpy d_b_raw");
     }
@@ -310,7 +329,7 @@ void run_case(Args const& args)
     cudaStream_t stream{};
     check_cuda(cudaStreamCreate(&stream), "cudaStreamCreate");
 
-    if (!offline_prepack)
+    if (!args.offline_prepack)
     {
         if constexpr (std::is_same_v<Element, cutlass::half_t>)
         {
@@ -342,7 +361,7 @@ void run_case(Args const& args)
         check_cuda(cudaStreamSynchronize(stream), "prepack sync");
         if (!args.save_prepacked_path.empty())
         {
-            std::vector<uint32_t> h_b_prepacked(h_b.size());
+            std::vector<uint32_t> h_b_prepacked(b_words);
             check_cuda(cudaMemcpy(h_b_prepacked.data(), d_b_prepacked, b_bytes, cudaMemcpyDeviceToHost),
                 "cudaMemcpy save prepacked");
             write_prepacked_file(args.save_prepacked_path, h_b_prepacked.data(), b_bytes);

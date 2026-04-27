@@ -107,7 +107,7 @@ machete_standalone/build_cmake_release/test_machete_gemm \
 ```
 
 Run later with the weight already prepacked offline. This skips the runtime GPU
-prepack kernel:
+prepack kernel and loads B from the saved file:
 
 ```
 machete_standalone/build_cmake_release/test_machete_gemm \
@@ -115,6 +115,17 @@ machete_standalone/build_cmake_release/test_machete_gemm \
   --act=fp16 --quant=gptq_u4b8 \
   --offline_prepack=/tmp/machete_b_4096x4096_fp16_gptq_u4b8.bin \
   --warmup=0 --iters=1
+```
+
+For performance-only profiling where the actual B contents do not matter, omit
+the path. The test allocates the prepacked B device buffer directly and does not
+run runtime prepack, file IO, or a B H2D copy:
+
+```
+machete_standalone/build_cmake_release/test_machete_gemm \
+  --m=4096 --n=4096 --k=4096 --group_size=128 \
+  --act=fp16 --quant=gptq_u4b8 \
+  --offline_prepack --no_checksum --warmup=0 --iters=1
 ```
 
 For profiler captures focused only on the timed GEMM loop, use CUDA profiler
@@ -126,7 +137,7 @@ nsys profile -t cuda,nvtx --capture-range=cudaProfilerApi \
   machete_standalone/build_cmake_release/test_machete_gemm \
     --m=4096 --n=4096 --k=4096 --group_size=128 \
     --act=fp16 --quant=gptq_u4b8 \
-    --offline_prepack=/tmp/machete_b_4096x4096_fp16_gptq_u4b8.bin \
+    --offline_prepack \
     --profile_gemm_only --no_checksum --warmup=0 --iters=1
 ```
 
