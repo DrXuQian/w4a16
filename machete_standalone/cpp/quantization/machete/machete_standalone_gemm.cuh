@@ -56,6 +56,7 @@ inline std::vector<MacheteSchedule> supported_schedules()
 {
     return {
         {"128x128_2x1x1_TmaMI_TmaCoop_streamK", 128, 128, 2, 1, 1},
+        {"128x128_1x1x1_TmaMI_TmaCoop_streamK", 128, 128, 1, 1, 1},
         {"128x256_2x1x1_TmaMI_TmaCoop_streamK", 128, 256, 2, 1, 1},
         {"128x64_2x1x1_TmaMI_TmaCoop_streamK", 128, 64, 2, 1, 1},
         {"128x32_2x1x1_TmaMI_TmaCoop_streamK", 128, 32, 2, 1, 1},

@@ -45,6 +45,12 @@ size_t workspace_size(cudaStream_t stream, ElementA const* A, typename Kernel::E
             using Kernel = KERNEL_ALIAS<ELEMENT_A, Sch>;                                                                \
             __VA_ARGS__;                                                                                                \
         }                                                                                                               \
+        if (schedule.tile_n == 128 && schedule.tile_m == 128 && schedule.cluster_n == 1 && schedule.cluster_m == 1)     \
+        {                                                                                                               \
+            using Sch = ScheduleTemplate<128, 128, 1, 1, 1>;                                                            \
+            using Kernel = KERNEL_ALIAS<ELEMENT_A, Sch>;                                                                \
+            __VA_ARGS__;                                                                                                \
+        }                                                                                                               \
         if (schedule.tile_n == 128 && schedule.tile_m == 256 && schedule.cluster_n == 2 && schedule.cluster_m == 1)     \
         {                                                                                                               \
             using Sch = ScheduleTemplate<128, 256, 2, 1, 1>;                                                            \
