@@ -17,47 +17,48 @@ Included projects
 ## Build
 
 ```bash
-make -f fpA_intB_standalone/Makefile.nvcc \
-  GPU_ARCH=sm_90a \
-  CUTLASS_DIR=$PWD/../../third_party/cutlass
+cmake -S fpA_intB_standalone -B fpA_intB_standalone/build_cmake_release \
+  -DGPU_ARCH=sm_90a \
+  -DCUTLASS_DIR=$PWD/../../third_party/cutlass \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build fpA_intB_standalone/build_cmake_release \
+  --target test_fpA_intB_gemm -j$(nproc)
 
-make -f moe_w4a16_standalone/Makefile.nvcc \
-  GPU_ARCH=sm_90 \
-  CUTLASS_DIR=$PWD/../../third_party/cutlass
+cmake -S moe_w4a16_standalone -B moe_w4a16_standalone/build_cmake_release \
+  -DCMAKE_CUDA_ARCHITECTURES=90 \
+  -DCUTLASS_DIR=$PWD/../../third_party/cutlass \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build moe_w4a16_standalone/build_cmake_release \
+  --target test_moe_w4a16_gemm -j$(nproc)
 ```
-
-If `fpA_intB` is built with a Clang/PPU `nvcc` wrapper and hits an
-`fpclassify` host/device constexpr overload error, the Makefile should enable
-the compatibility flag automatically. If it does not, add
-`CLANG_CUDA_COMPAT=1` to the `fpA_intB` make command.
 
 ## Usage
 
 ```bash
 # Basic run (profiles all configs on first call, slow ~5s)
-fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm --m=1 --n=12288 --k=3072 --group_size=128
+fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm --m=1 --n=12288 --k=3072 --group_size=128
 
 # With tactic cache (recommended):
 #   First run: profiles and saves best config to file
 #   Subsequent runs with same (m,n,k,gs): loads directly, no profiling
-fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm --m=1 --n=12288 --k=3072 --group_size=128 \
+fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm --m=1 --n=12288 --k=3072 --group_size=128 \
     --tactic=tactics.cache --warmup=10 --iters=100
 
 # Force a specific config (skip profiling entirely)
-fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm --m=1 --n=12288 --k=3072 --group_size=128 --config=cuda
-fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm --m=3823 --n=12288 --k=3072 --group_size=128 --config=64,16,64,4,1
+fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm --m=1 --n=12288 --k=3072 --group_size=128 --config=cuda
+fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm --m=3823 --n=12288 --k=3072 --group_size=128 --config=64,16,64,4,1
 
 # List all available configs
-fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm --list_configs
+fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm --list_configs
 
 # Debug profiling (print per-config timing)
-FPA_INTB_PROFILE_LOG=1 fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm --m=3823 --n=4096 --k=4096 --group_size=128
+FPA_INTB_PROFILE_LOG=1 fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm --m=3823 --n=4096 --k=4096 --group_size=128
 
 # Correctness verification (small shapes only)
-fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm --m=2 --n=128 --k=128 --group_size=128 --verify
+fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm --m=2 --n=128 --k=128 --group_size=128 --verify
 
 # Single inference, no profiling, no warmup (GPU only runs the GEMM kernel)
-fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm --m=1 --n=12288 --k=3072 --group_size=128 \
+fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm --m=1 --n=12288 --k=3072 --group_size=128 \
     --tactic=tactics.cache --warmup=0 --iters=1
 ```
 
@@ -86,7 +87,6 @@ Delete the cache file to force re-profiling (e.g. when switching GPU arch).
 ## Notes
 
 - Build directories are intentionally ignored (see `.gitignore`).
-- `fpA_intB_standalone` defaults to `GPU_ARCH=sm_90a` for Hopper TMA kernels.
-- `moe_w4a16_standalone` defaults to `GPU_ARCH=sm_90` because this extraction
-  uses the SM80 grouped GEMM fallback on Hopper.
-- Pass `GPU_ARCH=sm_80` for Ampere.
+- `fpA_intB_standalone` uses `-DGPU_ARCH=sm_90a` for Hopper TMA kernels.
+- `moe_w4a16_standalone` uses `-DCMAKE_CUDA_ARCHITECTURES=90` on Hopper because
+  this extraction uses the SM80 grouped GEMM fallback. Use `80` for Ampere.

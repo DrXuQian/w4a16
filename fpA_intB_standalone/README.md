@@ -47,64 +47,40 @@ Input/weight layout assumptions
 
 Build
 -----
-From the repo root, use the direct `nvcc` Makefile as the default build path.
+From the repo root:
 
 ```
-make -f fpA_intB_standalone/Makefile.nvcc \
-  GPU_ARCH=sm_90a \
-  CUTLASS_DIR=$PWD/../../third_party/cutlass
+cmake -S fpA_intB_standalone -B fpA_intB_standalone/build_cmake_release \
+  -DGPU_ARCH=sm_90a \
+  -DCUTLASS_DIR=$PWD/../../third_party/cutlass \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build fpA_intB_standalone/build_cmake_release \
+  --target test_fpA_intB_gemm -j$(nproc)
 ```
 
-The output binary is `fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm`.
-Use `GPU_ARCH=sm_80` for an Ampere build.
-
-The Makefile probes whether the CUDA compiler accepts Clang's
-`-fno-cuda-host-device-constexpr` option and enables it automatically when
-available. If a Clang/PPU wrapper still fails with an `fpclassify` host/device
-constexpr overload error while including `/usr/include/c++/13/cmath`, use an
-older host compiler for both C++ and CUDA host compilation:
-
-```
-make -f fpA_intB_standalone/Makefile.nvcc \
-  GPU_ARCH=sm_90a \
-  CUTLASS_DIR=$PWD/../../third_party/cutlass \
-  CXX=/usr/bin/g++-12 \
-  HOST_CXX=/usr/bin/g++-12
-```
-
-If the wrapper also requires the Clang CUDA constexpr workaround, force it:
-
-```
-make -f fpA_intB_standalone/Makefile.nvcc \
-  GPU_ARCH=sm_90a \
-  CUTLASS_DIR=$PWD/../../third_party/cutlass \
-  CXX=/usr/bin/g++-12 \
-  HOST_CXX=/usr/bin/g++-12 \
-  CLANG_CUDA_COMPAT=1
-```
-
-If you need to mirror CMake's CUDA driver behavior more closely, add
-`NVCC_FORWARD_UNKNOWN=1`.
+The output binary is
+`fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm`.
+Use `-DGPU_ARCH=sm_80` for an Ampere build.
 
 Run
 ---
 Example:
 
 ```
-fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm \
+fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm \
   --m=1 --n=4096 --k=4096 --group_size=128
 ```
 
 List configs:
 
 ```
-fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm --list_configs
+fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm --list_configs
 ```
 
 Force CUDA kernel:
 
 ```
-fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm \
+fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm \
   --m=1 --n=4096 --k=4096 --group_size=128 \
   --config=cuda
 ```
@@ -112,7 +88,7 @@ fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm \
 Force a CUTLASS config (tile_m,tile_n,tile_k,stages,split_k):
 
 ```
-fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm \
+fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm \
   --m=1 --n=4096 --k=4096 --group_size=128 \
   --config=16x128x64x3x1
 ```
@@ -137,7 +113,7 @@ Example: `tile_enum=11 stages=3 split_k=7` corresponds to:
 - so the CLI form is:
 
 ```
-fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm \
+fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm \
   --m=1 --n=2048 --k=3584 --group_size=128 \
   --config=128x128x64x3x7
 ```
@@ -158,7 +134,7 @@ Note: `--ncu` requires `--config=...` to avoid profiling-style config search.
 Example:
 
 ```
-fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm \
+fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm \
   --m=1 --n=2048 --k=2048 --group_size=128 \
   --ncu --config=cuda --iters=2000
 ```
@@ -169,7 +145,7 @@ Set `FPA_INTB_PROFILE_LOG=1` to print each candidate config, its timing, and fai
 
 ```
 FPA_INTB_PROFILE_LOG=1 \
-fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm \
+fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm \
   --m=1 --n=4096 --k=4096 --group_size=128
 ```
 
@@ -179,7 +155,7 @@ Use the helper script to run every candidate configuration directly:
 
 ```
 fpA_intB_standalone/scripts/run_all_configs.sh \
-  --bin fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm \
+  --bin fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm \
   --m 1 --n 4096 --k 4096 --group 128 --warmup 10 --iters 100 --out results.txt
 ```
 
@@ -187,14 +163,14 @@ Skip the CUDA fallback:
 
 ```
 fpA_intB_standalone/scripts/run_all_configs.sh \
-  --bin fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm \
+  --bin fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm \
   --m 1 --n 4096 --k 4096 --group 128 --warmup 10 --iters 100 --skip-cuda
 ```
 
 CPU reference (small shapes only):
 
 ```
-fpA_intB_standalone/build_nvcc/test_fpA_intB_gemm \
+fpA_intB_standalone/build_cmake_release/test_fpA_intB_gemm \
   --m=1 --n=128 --k=128 --group_size=128 --verify
 ```
 
