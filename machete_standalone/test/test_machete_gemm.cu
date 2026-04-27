@@ -1,0 +1,395 @@
+#include "quantization/machete/machete_standalone_gemm.cuh"
+
+#include <cuda_runtime.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <limits>
+#include <string>
+#include <type_traits>
+#include <vector>
+
+namespace {
+
+struct Args
+{
+    int m = 4096;
+    int n = 4096;
+    int k = 4096;
+    int group_size = 128;
+    int warmup = 10;
+    int iters = 100;
+    bool list_schedules = false;
+    std::string schedule;
+    std::string act = "fp16";
+    std::string quant = "gptq_u4b8";
+};
+
+bool parse_int(char const* arg, char const* key, int& out)
+{
+    size_t const len = std::strlen(key);
+    if (std::strncmp(arg, key, len) != 0)
+    {
+        return false;
+    }
+    out = std::strtol(arg + len, nullptr, 10);
+    return true;
+}
+
+void print_usage(char const* name)
+{
+    std::printf("Usage: %s [--m=N] [--n=N] [--k=N] [--group_size=N|-1] [--warmup=N] [--iters=N] "
+                "[--act=fp16|bf16] [--quant=gptq_u4b8|awq_u4] [--schedule=<name>] [--list_schedules]\n",
+        name);
+}
+
+void parse_args(int argc, char** argv, Args& args)
+{
+    for (int i = 1; i < argc; ++i)
+    {
+        if (std::strcmp(argv[i], "--help") == 0)
+        {
+            print_usage(argv[0]);
+            std::exit(0);
+        }
+        if (parse_int(argv[i], "--m=", args.m) || parse_int(argv[i], "--n=", args.n)
+            || parse_int(argv[i], "--k=", args.k) || parse_int(argv[i], "--group_size=", args.group_size)
+            || parse_int(argv[i], "--warmup=", args.warmup) || parse_int(argv[i], "--iters=", args.iters))
+        {
+            continue;
+        }
+        if (std::strncmp(argv[i], "--schedule=", 11) == 0)
+        {
+            args.schedule = argv[i] + 11;
+            continue;
+        }
+        if (std::strncmp(argv[i], "--act=", 6) == 0)
+        {
+            args.act = argv[i] + 6;
+            continue;
+        }
+        if (std::strncmp(argv[i], "--quant=", 8) == 0)
+        {
+            args.quant = argv[i] + 8;
+            continue;
+        }
+        if (std::strcmp(argv[i], "--list_schedules") == 0)
+        {
+            args.list_schedules = true;
+            continue;
+        }
+        std::fprintf(stderr, "Unknown argument: %s\n", argv[i]);
+        print_usage(argv[0]);
+        std::exit(1);
+    }
+}
+
+void check_cuda(cudaError_t status, char const* label)
+{
+    if (status != cudaSuccess)
+    {
+        std::fprintf(stderr, "CUDA error at %s: %s (%d)\n", label, cudaGetErrorString(status), int(status));
+        std::abort();
+    }
+}
+
+template <typename T>
+T make_value(size_t i, float scale)
+{
+    return T(float(i % 113) * scale);
+}
+
+template <typename T>
+float to_float(T const& value)
+{
+    return float(value);
+}
+
+std::vector<uint32_t> make_packed_u4b8_col_major(int k, int n)
+{
+    int constexpr pack = 8;
+    int const packed_k = k / pack;
+    std::vector<uint32_t> packed(static_cast<size_t>(packed_k) * n, 0);
+    for (int col = 0; col < n; ++col)
+    {
+        for (int pk = 0; pk < packed_k; ++pk)
+        {
+            uint32_t word = 0;
+            for (int i = 0; i < pack; ++i)
+            {
+                int const row = pk * pack + i;
+                uint32_t const q = static_cast<uint32_t>((row + col) & 0xF);
+                word |= q << (4 * i);
+            }
+            packed[static_cast<size_t>(col) * packed_k + pk] = word;
+        }
+    }
+    return packed;
+}
+
+template <typename Element>
+void run_case(Args const& args)
+{
+    using namespace machete_standalone;
+
+    MacheteSchedule schedule{};
+    if (args.schedule.empty())
+    {
+        schedule = select_schedule(args.m, args.n, args.k);
+    }
+    else
+    {
+        auto parsed = schedule_from_name(args.schedule);
+        if (!parsed)
+        {
+            std::fprintf(stderr, "Unknown schedule: %s\n", args.schedule.c_str());
+            std::exit(1);
+        }
+        schedule = *parsed;
+    }
+
+    int const group_size = args.group_size == -1 ? args.k : args.group_size;
+    if (args.k % 64 != 0 || args.n % 128 != 0 || args.k % group_size != 0)
+    {
+        std::fprintf(stderr, "Invalid shape: K must be multiple of 64/group_size and N must be multiple of 128.\n");
+        std::exit(1);
+    }
+
+    bool const is_gptq = args.quant == "gptq_u4b8";
+    bool const is_awq = args.quant == "awq_u4";
+    if (!is_gptq && !is_awq)
+    {
+        std::fprintf(stderr, "Unsupported --quant=%s\n", args.quant.c_str());
+        std::exit(1);
+    }
+
+    std::printf("m=%d n=%d k=%d group_size=%d act=%s quant=%s\n", args.m, args.n, args.k, args.group_size,
+        args.act.c_str(), args.quant.c_str());
+    std::printf("selected schedule: %s\n", schedule.name);
+
+    std::vector<Element> h_a(static_cast<size_t>(args.m) * args.k);
+    std::vector<Element> h_scales(static_cast<size_t>(args.k / group_size) * args.n);
+    std::vector<Element> h_zeros(static_cast<size_t>(args.k / group_size) * args.n);
+    std::vector<Element> h_out(static_cast<size_t>(args.m) * args.n);
+    for (size_t i = 0; i < h_a.size(); ++i)
+    {
+        h_a[i] = make_value<Element>(i, 0.01f);
+    }
+    for (size_t i = 0; i < h_scales.size(); ++i)
+    {
+        h_scales[i] = make_value<Element>(i, 0.001f);
+        h_zeros[i] = make_value<Element>(i, 0.01f);
+    }
+    std::vector<uint32_t> h_b = make_packed_u4b8_col_major(args.k, args.n);
+
+    Element* d_a = nullptr;
+    Element* d_scales = nullptr;
+    Element* d_zeros = nullptr;
+    Element* d_out = nullptr;
+    uint32_t* d_b_raw = nullptr;
+    uint32_t* d_b_prepacked = nullptr;
+
+    size_t const a_bytes = h_a.size() * sizeof(Element);
+    size_t const scales_bytes = h_scales.size() * sizeof(Element);
+    size_t const out_bytes = h_out.size() * sizeof(Element);
+    size_t const b_bytes = h_b.size() * sizeof(uint32_t);
+
+    check_cuda(cudaMalloc(&d_a, a_bytes), "cudaMalloc d_a");
+    check_cuda(cudaMalloc(&d_scales, scales_bytes), "cudaMalloc d_scales");
+    check_cuda(cudaMalloc(&d_zeros, scales_bytes), "cudaMalloc d_zeros");
+    check_cuda(cudaMalloc(&d_out, out_bytes), "cudaMalloc d_out");
+    check_cuda(cudaMalloc(&d_b_raw, b_bytes), "cudaMalloc d_b_raw");
+    check_cuda(cudaMalloc(&d_b_prepacked, b_bytes), "cudaMalloc d_b_prepacked");
+    check_cuda(cudaMemcpy(d_a, h_a.data(), a_bytes, cudaMemcpyHostToDevice), "cudaMemcpy d_a");
+    check_cuda(cudaMemcpy(d_scales, h_scales.data(), scales_bytes, cudaMemcpyHostToDevice), "cudaMemcpy d_scales");
+    check_cuda(cudaMemcpy(d_zeros, h_zeros.data(), scales_bytes, cudaMemcpyHostToDevice), "cudaMemcpy d_zeros");
+    check_cuda(cudaMemcpy(d_b_raw, h_b.data(), b_bytes, cudaMemcpyHostToDevice), "cudaMemcpy d_b_raw");
+
+    cudaStream_t stream{};
+    check_cuda(cudaStreamCreate(&stream), "cudaStreamCreate");
+
+    if constexpr (std::is_same_v<Element, cutlass::half_t>)
+    {
+        if (is_gptq)
+        {
+            prepack_B_fp16_u4b8(stream, reinterpret_cast<cutlass::vllm_uint4b8_t const*>(d_b_raw),
+                reinterpret_cast<cutlass::vllm_uint4b8_t*>(d_b_prepacked), args.k, args.n);
+        }
+        else
+        {
+            prepack_B_fp16_u4(stream, reinterpret_cast<cutlass::uint4b_t const*>(d_b_raw),
+                reinterpret_cast<cutlass::uint4b_t*>(d_b_prepacked), args.k, args.n);
+        }
+    }
+    else
+    {
+        if (is_gptq)
+        {
+            prepack_B_bf16_u4b8(stream, reinterpret_cast<cutlass::vllm_uint4b8_t const*>(d_b_raw),
+                reinterpret_cast<cutlass::vllm_uint4b8_t*>(d_b_prepacked), args.k, args.n);
+        }
+        else
+        {
+            prepack_B_bf16_u4(stream, reinterpret_cast<cutlass::uint4b_t const*>(d_b_raw),
+                reinterpret_cast<cutlass::uint4b_t*>(d_b_prepacked), args.k, args.n);
+        }
+    }
+    check_cuda(cudaGetLastError(), "prepack launch");
+    check_cuda(cudaStreamSynchronize(stream), "prepack sync");
+
+    size_t workspace_bytes = 0;
+    if constexpr (std::is_same_v<Element, cutlass::half_t>)
+    {
+        if (is_gptq)
+        {
+            workspace_bytes = machete_get_workspace_size_fp16_u4b8(d_a,
+                reinterpret_cast<cutlass::vllm_uint4b8_t const*>(d_b_prepacked), d_scales, d_out, args.m, args.n,
+                args.k, args.group_size, schedule);
+        }
+        else
+        {
+            workspace_bytes = machete_get_workspace_size_fp16_u4(d_a,
+                reinterpret_cast<cutlass::uint4b_t const*>(d_b_prepacked), d_scales, d_zeros, d_out, args.m, args.n,
+                args.k, args.group_size, schedule);
+        }
+    }
+    else
+    {
+        if (is_gptq)
+        {
+            workspace_bytes = machete_get_workspace_size_bf16_u4b8(d_a,
+                reinterpret_cast<cutlass::vllm_uint4b8_t const*>(d_b_prepacked), d_scales, d_out, args.m, args.n,
+                args.k, args.group_size, schedule);
+        }
+        else
+        {
+            workspace_bytes = machete_get_workspace_size_bf16_u4(d_a,
+                reinterpret_cast<cutlass::uint4b_t const*>(d_b_prepacked), d_scales, d_zeros, d_out, args.m, args.n,
+                args.k, args.group_size, schedule);
+        }
+    }
+    void* d_workspace = nullptr;
+    if (workspace_bytes > 0)
+    {
+        check_cuda(cudaMalloc(&d_workspace, workspace_bytes), "cudaMalloc d_workspace");
+    }
+    std::printf("workspace bytes: %zu\n", workspace_bytes);
+
+    auto launch = [&]() {
+        if constexpr (std::is_same_v<Element, cutlass::half_t>)
+        {
+            if (is_gptq)
+            {
+                machete_mm_fp16_u4b8(stream, d_a, reinterpret_cast<cutlass::vllm_uint4b8_t const*>(d_b_prepacked),
+                    d_scales, d_out, args.m, args.n, args.k, args.group_size, schedule, d_workspace, workspace_bytes);
+            }
+            else
+            {
+                machete_mm_fp16_u4(stream, d_a, reinterpret_cast<cutlass::uint4b_t const*>(d_b_prepacked), d_scales,
+                    d_zeros, d_out, args.m, args.n, args.k, args.group_size, schedule, d_workspace, workspace_bytes);
+            }
+        }
+        else
+        {
+            if (is_gptq)
+            {
+                machete_mm_bf16_u4b8(stream, d_a, reinterpret_cast<cutlass::vllm_uint4b8_t const*>(d_b_prepacked),
+                    d_scales, d_out, args.m, args.n, args.k, args.group_size, schedule, d_workspace, workspace_bytes);
+            }
+            else
+            {
+                machete_mm_bf16_u4(stream, d_a, reinterpret_cast<cutlass::uint4b_t const*>(d_b_prepacked), d_scales,
+                    d_zeros, d_out, args.m, args.n, args.k, args.group_size, schedule, d_workspace, workspace_bytes);
+            }
+        }
+    };
+
+    for (int i = 0; i < args.warmup; ++i)
+    {
+        launch();
+    }
+    cudaEvent_t start{};
+    cudaEvent_t stop{};
+    check_cuda(cudaEventCreate(&start), "cudaEventCreate start");
+    check_cuda(cudaEventCreate(&stop), "cudaEventCreate stop");
+    check_cuda(cudaEventRecord(start, stream), "cudaEventRecord start");
+    for (int i = 0; i < args.iters; ++i)
+    {
+        launch();
+    }
+    check_cuda(cudaEventRecord(stop, stream), "cudaEventRecord stop");
+    check_cuda(cudaEventSynchronize(stop), "cudaEventSynchronize stop");
+    float ms = 0.0f;
+    check_cuda(cudaEventElapsedTime(&ms, start, stop), "cudaEventElapsedTime");
+    check_cuda(cudaMemcpy(h_out.data(), d_out, out_bytes, cudaMemcpyDeviceToHost), "cudaMemcpy d_out");
+
+    double checksum = 0.0;
+    for (size_t i = 0; i < std::min<size_t>(h_out.size(), 1024); ++i)
+    {
+        checksum += to_float(h_out[i]);
+    }
+    double const flops = 2.0 * double(args.m) * args.n * args.k;
+    double const avg_us = double(ms) * 1000.0 / args.iters;
+    std::printf("checksum=%f\n", checksum);
+    std::printf("Avg kernel time: %.3f us (%.1f TFLOPS, %d iters, %d warmup)\n", avg_us, flops / (avg_us * 1e-6) / 1e12,
+        args.iters, args.warmup);
+
+    check_cuda(cudaEventDestroy(start), "cudaEventDestroy start");
+    check_cuda(cudaEventDestroy(stop), "cudaEventDestroy stop");
+    check_cuda(cudaStreamDestroy(stream), "cudaStreamDestroy");
+    if (d_workspace)
+    {
+        check_cuda(cudaFree(d_workspace), "cudaFree workspace");
+    }
+    check_cuda(cudaFree(d_a), "cudaFree d_a");
+    check_cuda(cudaFree(d_scales), "cudaFree d_scales");
+    check_cuda(cudaFree(d_zeros), "cudaFree d_zeros");
+    check_cuda(cudaFree(d_out), "cudaFree d_out");
+    check_cuda(cudaFree(d_b_raw), "cudaFree d_b_raw");
+    check_cuda(cudaFree(d_b_prepacked), "cudaFree d_b_prepacked");
+}
+
+} // namespace
+
+int main(int argc, char** argv)
+{
+    Args args;
+    parse_args(argc, argv, args);
+    if (args.list_schedules)
+    {
+        auto schedules = machete_standalone::supported_schedules();
+        std::printf("Supported schedules (%zu):\n", schedules.size());
+        for (size_t i = 0; i < schedules.size(); ++i)
+        {
+            std::printf("  %zu: %s\n", i, schedules[i].name);
+        }
+        return 0;
+    }
+
+    try
+    {
+        if (args.act == "fp16")
+        {
+            run_case<cutlass::half_t>(args);
+        }
+        else if (args.act == "bf16")
+        {
+            run_case<cutlass::bfloat16_t>(args);
+        }
+        else
+        {
+            std::fprintf(stderr, "Unsupported --act=%s\n", args.act.c_str());
+            return 1;
+        }
+    }
+    catch (std::exception const& e)
+    {
+        std::fprintf(stderr, "ERROR: %s\n", e.what());
+        return 1;
+    }
+    return 0;
+}

@@ -1,0 +1,163 @@
+Standalone vLLM Machete GEMM for SM90
+=====================================
+
+This directory contains a minimal, standalone extraction of vLLM's Machete
+weight-only GEMM path. It keeps the Machete prepacked weight layout, SM90 TMA
+warp-specialized CUTLASS kernel, and the H100/H800 heuristic schedule selector
+from vLLM.
+
+Source
+------
+- vLLM tree used for extraction:
+  `/root/autodl-tmp/awesome-cute/Vibe-CUTE/3rdparty/vllm`
+- Source commit observed locally:
+  `e3126cd107460444d7fd9a1445b8d4f4393a06b2`
+- Main extracted files:
+  - `csrc/quantization/machete/*`
+  - `csrc/cutlass_extensions/*`
+
+Scope
+-----
+Supported:
+
+- SM90/SM90a Hopper builds
+- FP16 and BF16 activations
+- INT4 weights:
+  - GPTQ-style `u4b8` with group scales
+  - AWQ-style `u4` with group scales and group zeros
+- vLLM Machete prepack kernel
+- vLLM H100 heuristic schedule selection
+
+Not included:
+
+- PyTorch/ATen bindings
+- u8/u8b128 kernels
+- channel scales or token scales
+- SM80/SM100+ specializations
+
+Build
+-----
+From this directory's parent repo:
+
+```
+cmake -S machete_standalone -B machete_standalone/build_cmake_release \
+  -DGPU_ARCH=sm_90a \
+  -DCUTLASS_DIR=$PWD/../../third_party/cutlass \
+  -DCMAKE_BUILD_TYPE=Release
+
+cmake --build machete_standalone/build_cmake_release \
+  --target test_machete_gemm -j$(nproc)
+```
+
+If the machine has multiple CUDA/PPU SDKs in `PATH`, configure CMake with the
+intended compiler explicitly:
+
+```
+CUDA_ROOT=/path/to/CUDA_SDK
+CUDACXX=$CUDA_ROOT/bin/nvcc \
+cmake -S machete_standalone -B machete_standalone/build_cmake_release \
+  -DCUDAToolkit_ROOT=$CUDA_ROOT \
+  -DGPU_ARCH=sm_90a \
+  -DCUTLASS_DIR=$PWD/../../third_party/cutlass \
+  -DCMAKE_BUILD_TYPE=Release
+```
+
+Run
+---
+Default run, using heuristic schedule selection:
+
+```
+machete_standalone/build_cmake_release/test_machete_gemm \
+  --m=4096 --n=4096 --k=4096 --group_size=128 \
+  --act=fp16 --quant=gptq_u4b8 \
+  --warmup=100 --iters=1000
+```
+
+AWQ-style u4:
+
+```
+machete_standalone/build_cmake_release/test_machete_gemm \
+  --m=4096 --n=4096 --k=4096 --group_size=128 \
+  --act=bf16 --quant=awq_u4 \
+  --warmup=100 --iters=1000
+```
+
+List schedules:
+
+```
+machete_standalone/build_cmake_release/test_machete_gemm --list_schedules
+```
+
+Force a schedule:
+
+```
+machete_standalone/build_cmake_release/test_machete_gemm \
+  --m=128 --n=4096 --k=4096 --group_size=128 \
+  --schedule=128x32_2x1x1_TmaMI_TmaCoop_streamK
+```
+
+Run all schedules:
+
+```
+machete_standalone/scripts/run_all_schedules.sh \
+  --bin machete_standalone/build_cmake_release/test_machete_gemm \
+  --m 4096 --n 4096 --k 4096 --group 128 \
+  --act fp16 --quant gptq_u4b8 \
+  --warmup 100 --iters 1000 --out /tmp/machete_4096_all_schedules.txt
+```
+
+Heuristic
+---------
+This is copied from vLLM `csrc/quantization/machete/generate.py`.
+The condition order matters.
+
+| Condition | Schedule |
+|---|---|
+| `M > 256 && K <= 16384 && N <= 4096` | `128x128_2x1x1_TmaMI_TmaCoop_streamK` |
+| `M > 256` | `128x256_2x1x1_TmaMI_TmaCoop_streamK` |
+| `M > 128 && K <= 4096 && N <= 4096` | `128x64_2x1x1_TmaMI_TmaCoop_streamK` |
+| `M > 128 && K <= 8192 && N <= 8192` | `128x128_2x1x1_TmaMI_TmaCoop_streamK` |
+| `M > 128` | `128x256_2x1x1_TmaMI_TmaCoop_streamK` |
+| `M > 64 && K <= 4069 && N <= 4069` | `128x32_2x1x1_TmaMI_TmaCoop_streamK` |
+| `M > 64 && K <= 4069 && N <= 8192` | `128x64_2x1x1_TmaMI_TmaCoop_streamK` |
+| `M > 64 && K >= 8192 && N >= 12288` | `256x128_2x1x1_TmaMI_TmaCoop_streamK` |
+| `M > 64` | `128x128_2x1x1_TmaMI_TmaCoop_streamK` |
+| `M > 32 && K <= 6144 && N <= 6144` | `128x16_1x1x1_TmaMI_TmaCoop_streamK` |
+| `M > 32 && K >= 16384 && N >= 12288` | `256x64_2x1x1_TmaMI_TmaCoop_streamK` |
+| `M > 32` | `128x64_2x1x1_TmaMI_TmaCoop_streamK` |
+| `M > 16 && K <= 12288 && N <= 8192` | `128x32_2x1x1_TmaMI_TmaCoop_streamK` |
+| `M > 16` | `256x32_2x1x1_TmaMI_TmaCoop_streamK` |
+| `N >= 26624` | `256x16_1x1x1_TmaMI_TmaCoop_streamK` |
+| fallback | `128x16_1x1x1_TmaMI_TmaCoop_streamK` |
+
+Supported schedule set:
+
+```
+128x128_2x1x1_TmaMI_TmaCoop_streamK
+128x256_2x1x1_TmaMI_TmaCoop_streamK
+128x64_2x1x1_TmaMI_TmaCoop_streamK
+128x32_2x1x1_TmaMI_TmaCoop_streamK
+256x128_2x1x1_TmaMI_TmaCoop_streamK
+128x16_1x1x1_TmaMI_TmaCoop_streamK
+256x64_2x1x1_TmaMI_TmaCoop_streamK
+256x32_2x1x1_TmaMI_TmaCoop_streamK
+256x16_1x1x1_TmaMI_TmaCoop_streamK
+```
+
+Smoke Test
+----------
+Verified locally on H800 PCIe, compute capability 9.0:
+
+```
+test_machete_gemm --m=128 --n=128 --k=128 --group_size=128 --warmup=1 --iters=1
+```
+
+The four combinations below launch successfully:
+
+- `--act=fp16 --quant=gptq_u4b8`
+- `--act=bf16 --quant=gptq_u4b8`
+- `--act=fp16 --quant=awq_u4`
+- `--act=bf16 --quant=awq_u4`
+
+For `4096x4096x4096`, the heuristic selects
+`128x128_2x1x1_TmaMI_TmaCoop_streamK`.
