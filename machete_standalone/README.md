@@ -116,6 +116,50 @@ machete_standalone/build_cmake_release/test_machete_gemm \
   --offline_prepack --no_checksum --warmup=100 --iters=1000
 ```
 
+Save the best searched config into a tactic cache:
+
+```
+machete_standalone/build_cmake_release/test_machete_gemm \
+  --search_cutlass55_configs \
+  --m=4096 --n=4096 --k=4096 --group_size=128 \
+  --act=fp16 --quant=cutlass_s4 \
+  --offline_prepack --no_checksum --warmup=100 --iters=1000 \
+  --save_cutlass55_tactic=machete_standalone/cutlass55_tactics_h800.cache
+```
+
+Load a cached config directly:
+
+```
+machete_standalone/build_cmake_release/test_machete_gemm \
+  --backend=cutlass55 \
+  --cutlass55_tactic=machete_standalone/cutlass55_tactics_h800.cache \
+  --m=4096 --n=4096 --k=4096 --group_size=128 \
+  --act=fp16 --quant=cutlass_s4 \
+  --offline_prepack --no_checksum --warmup=100 --iters=1000
+```
+
+The cache is exact-match text:
+
+```
+m,n,k,group,act|config=<cutlass55_config>,avg_us=<measured_time>
+```
+
+Batch-search a list of shapes and emit both a cache and a markdown table:
+
+```
+machete_standalone/scripts/search_cutlass55_tactics.sh \
+  --bin machete_standalone/build_cmake_release/test_machete_gemm \
+  --out-cache machete_standalone/cutlass55_tactics_h800.cache \
+  --out-md machete_standalone/CUTLASS55_TACTICS_H800.md \
+  --warmup 100 --iters 1000
+```
+
+For a custom shape file, each non-comment line is:
+
+```
+M N K GROUP ACT
+```
+
 AWQ-style u4:
 
 ```

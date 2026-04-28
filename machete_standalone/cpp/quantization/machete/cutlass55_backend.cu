@@ -50,7 +50,7 @@ struct Cutlass55ScaleOnlyKernel
     using ElementA = MmaType;
     using ElementB = cutlass::int4b_t;
     using ElementScale = MmaType;
-    using ElementC = MmaType;
+    using ElementC = void;
     using ElementD = MmaType;
     using ElementAccumulator = float;
 
@@ -63,7 +63,7 @@ struct Cutlass55ScaleOnlyKernel
 
     static int constexpr AlignmentA = 128 / cutlass::sizeof_bits_v<ElementA>;
     static int constexpr AlignmentB = 128 / cutlass::sizeof_bits_v<ElementB>;
-    static int constexpr AlignmentC = 128 / cutlass::sizeof_bits_v<ElementC>;
+    static int constexpr AlignmentC = 0;
     static int constexpr AlignmentD = 128 / cutlass::sizeof_bits_v<ElementD>;
     static int constexpr TileShapeK = 128 * 8 / cutlass::sizeof_bits_v<MmaType>;
 
@@ -130,14 +130,14 @@ struct Cutlass55ScaleOnlyKernel
         }
         int const scale_k = cutlass::ceil_div(k, group_size);
         auto stride_A = cutlass::make_cute_packed_stride(StrideA{}, cute::make_shape(m, k, 1));
-        auto stride_C = cutlass::make_cute_packed_stride(StrideC{}, cute::make_shape(n, m, 1));
         auto stride_D = cutlass::make_cute_packed_stride(StrideD{}, cute::make_shape(n, m, 1));
         auto stride_S = cutlass::make_cute_packed_stride(StrideScale{}, cute::make_shape(n, scale_k, 1));
         auto layout_B_reordered = make_reordered_B_layout(n, k);
+        (void) C;
 
         return Arguments{cutlass::gemm::GemmUniversalMode::kGemm, {n, m, k, 1},
             {B_reordered, layout_B_reordered, A, stride_A, scales, stride_S, group_size},
-            {{1.0f, 0.0f}, C, stride_C, D, stride_D}};
+            {{1.0f, 0.0f}, nullptr, {}, D, stride_D}};
     }
 
     static size_t get_workspace_size(Arguments const& args) { return Gemm::get_workspace_size(args); }

@@ -182,13 +182,17 @@ using ElementScale = MmaType;
 using ElementZero = ElementScale;
 using LayoutScale = cutlass::layout::RowMajor;
 
-// C/D matrix configuration
-using         ElementC    = MmaType;                                        // Element type for C and D matrix operands (matches MMA type)
-using         LayoutC     = cutlass::layout::RowMajor;                      // Layout type for C and D matrix operands
-constexpr int AlignmentC  = 128 / cutlass::sizeof_bits<ElementC>::value;    // Memory access granularity/alignment of C matrix in units of elements (up to 16 bytes)
+// C/D matrix configuration. The target kernel uses beta=0, so C is void and
+// the epilogue does not load the source C matrix. Keep ElementCRef for the
+// optional reference GEMM.
+using         ElementC    = void;
+using         ElementCRef = MmaType;
+using         LayoutC     = cutlass::layout::RowMajor;
+constexpr int AlignmentC  = 0;
+constexpr int AlignmentCRef = 128 / cutlass::sizeof_bits<ElementCRef>::value;
 
 // D matrix configuration
-using         ElementD    = ElementC;
+using         ElementD    = MmaType;
 using         LayoutD     = LayoutC;
 constexpr int AlignmentD  = 128 / cutlass::sizeof_bits<ElementD>::value;
 
@@ -357,7 +361,6 @@ using StrideD_ref = cutlass::detail::TagToStrideC_t<LayoutD>;
 /// Initialization
 StrideA stride_A;
 StrideB stride_B;
-StrideC stride_C;
 StrideC_ref stride_C_ref;
 StrideD stride_D;
 StrideD_ref stride_D_ref;
@@ -375,7 +378,7 @@ cutlass::DeviceAllocation<ElementB> block_B;
 cutlass::DeviceAllocation<ElementA> block_B_dq;
 cutlass::DeviceAllocation<ElementScale> block_scale;
 cutlass::DeviceAllocation<ElementZero> block_zero;
-cutlass::DeviceAllocation<ElementC> block_C;
+cutlass::DeviceAllocation<ElementCRef> block_C;
 cutlass::DeviceAllocation<typename GemmScaleOnly::EpilogueOutputOp::ElementOutput> block_D;
 cutlass::DeviceAllocation<typename GemmScaleOnly::EpilogueOutputOp::ElementOutput> block_ref_D;
 
@@ -485,7 +488,6 @@ void initialize(Options const& options) {
   stride_A = cutlass::make_cute_packed_stride(StrideA{}, cute::make_shape(options.m, options.k, options.l));
   stride_B = cutlass::make_cute_packed_stride(StrideB{}, shape_B);
   // Reverse stride here due to swap and transpose
-  stride_C = cutlass::make_cute_packed_stride(StrideC{}, cute::make_shape(options.n, options.m, options.l));
   stride_C_ref = cutlass::make_cute_packed_stride(StrideC_ref{}, cute::make_shape(options.m, options.n, options.l));
   // Reverse stride here due to swap and transpose
   stride_D = cutlass::make_cute_packed_stride(StrideD{}, cute::make_shape(options.n, options.m, options.l));
@@ -564,7 +566,7 @@ typename Gemm::Arguments args_from_options(Options const& options)
       cutlass::gemm::GemmUniversalMode::kGemm,
       {options.n, options.m, options.k, options.l},
       {block_B.get(), dB, block_A.get(), stride_A},
-      {{options.alpha, options.beta}, block_C.get(), stride_C, block_D.get(), stride_D}
+      {{options.alpha, 0.0f}, nullptr, {}, block_D.get(), stride_D}
     };
   } 
   else if (options.mode == MixedDtypeGemmMode::ScaleOnly) {
@@ -572,7 +574,7 @@ typename Gemm::Arguments args_from_options(Options const& options)
       cutlass::gemm::GemmUniversalMode::kGemm,
       {options.n, options.m, options.k, options.l},
       {block_B.get(), dB, block_A.get(), stride_A, block_scale.get(), stride_S, options.g},
-      {{options.alpha, options.beta}, block_C.get(), stride_C, block_D.get(), stride_D}
+      {{options.alpha, 0.0f}, nullptr, {}, block_D.get(), stride_D}
     };
   } 
   else if (options.mode == MixedDtypeGemmMode::ScaleWithZeroPoint) {
@@ -580,7 +582,7 @@ typename Gemm::Arguments args_from_options(Options const& options)
       cutlass::gemm::GemmUniversalMode::kGemm,
       {options.n, options.m, options.k, options.l},
       {block_B.get(), dB, block_A.get(), stride_A, block_scale.get(), stride_S, options.g, block_zero.get()},
-      {{options.alpha, options.beta}, block_C.get(), stride_C, block_D.get(), stride_D}
+      {{options.alpha, 0.0f}, nullptr, {}, block_D.get(), stride_D}
     };
   } else {
     std::cerr << "Invalid mode " << options.mode << ". Must be 0, 1 or 2." << std::endl;
@@ -608,7 +610,7 @@ bool verify(Options const& options) {
       TileShape, ClusterShape,
       cutlass::epilogue::collective::EpilogueTileAuto,
       ElementAccumulator, ElementAccumulator,
-      ElementC, LayoutC, AlignmentC,
+      ElementCRef, LayoutC, AlignmentCRef,
       ElementD, LayoutD, AlignmentD,
       cutlass::epilogue::NoSmemWarpSpecialized
     >::CollectiveOp;

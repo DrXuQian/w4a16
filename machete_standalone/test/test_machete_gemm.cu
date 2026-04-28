@@ -35,6 +35,8 @@ struct Args
     std::string backend = "machete";
     std::string schedule;
     std::string cutlass55_config = "128x128x64_1x1x1";
+    std::string cutlass55_tactic_file;
+    std::string save_cutlass55_tactic_file;
     std::string act = "fp16";
     std::string quant = "gptq_u4b8";
     std::string offline_prepack_path;
@@ -57,6 +59,7 @@ void print_usage(char const* name)
     std::printf("Usage: %s [--m=N] [--n=N] [--k=N] [--group_size=N|-1] [--warmup=N] [--iters=N] "
                 "[--backend=machete|cutlass55] [--act=fp16|bf16] [--quant=gptq_u4b8|awq_u4|cutlass_s4] "
                 "[--schedule=<name>] [--cutlass55_config=<name>] [--search_cutlass55_configs] "
+                "[--cutlass55_tactic=PATH] [--save_cutlass55_tactic=PATH] "
                 "[--save_prepacked=PATH] [--offline_prepack[=PATH]] [--profile_gemm_only] [--no_checksum] "
                 "[--list_schedules] [--list_cutlass55_configs]\n",
         name);
@@ -90,6 +93,26 @@ void parse_args(int argc, char** argv, Args& args)
         if (std::strncmp(argv[i], "--cutlass55-config=", 19) == 0)
         {
             args.cutlass55_config = argv[i] + 19;
+            continue;
+        }
+        if (std::strncmp(argv[i], "--cutlass55_tactic=", 19) == 0)
+        {
+            args.cutlass55_tactic_file = argv[i] + 19;
+            continue;
+        }
+        if (std::strncmp(argv[i], "--cutlass55-tactic=", 19) == 0)
+        {
+            args.cutlass55_tactic_file = argv[i] + 19;
+            continue;
+        }
+        if (std::strncmp(argv[i], "--save_cutlass55_tactic=", 24) == 0)
+        {
+            args.save_cutlass55_tactic_file = argv[i] + 24;
+            continue;
+        }
+        if (std::strncmp(argv[i], "--save-cutlass55-tactic=", 24) == 0)
+        {
+            args.save_cutlass55_tactic_file = argv[i] + 24;
             continue;
         }
         if (std::strncmp(argv[i], "--backend=", 10) == 0)
@@ -274,8 +297,63 @@ machete_standalone::Cutlass55Config find_cutlass55_config(std::string const& nam
     std::exit(1);
 }
 
+std::string cutlass55_tactic_key(int m, int n, int k, int group_size, std::string const& act)
+{
+    char buf[160];
+    std::snprintf(buf, sizeof(buf), "%d,%d,%d,%d,%s|", m, n, k, group_size, act.c_str());
+    return buf;
+}
+
+bool load_cutlass55_tactic(
+    std::string const& path, int m, int n, int k, int group_size, std::string const& act, std::string& config_name)
+{
+    std::ifstream f(path);
+    if (!f.is_open())
+    {
+        return false;
+    }
+
+    std::string const prefix = cutlass55_tactic_key(m, n, k, group_size, act);
+    std::string line;
+    while (std::getline(f, line))
+    {
+        if (line.empty() || line[0] == '#')
+        {
+            continue;
+        }
+        if (line.compare(0, prefix.size(), prefix) != 0)
+        {
+            continue;
+        }
+        std::string const payload = line.substr(prefix.size());
+        std::string const needle = "config=";
+        auto pos = payload.find(needle);
+        if (pos == std::string::npos)
+        {
+            return false;
+        }
+        pos += needle.size();
+        auto end = payload.find(',', pos);
+        config_name = payload.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+        return !config_name.empty();
+    }
+    return false;
+}
+
+void save_cutlass55_tactic(std::string const& path, int m, int n, int k, int group_size, std::string const& act,
+    std::string const& config_name, double avg_us)
+{
+    std::ofstream f(path, std::ios::app);
+    if (!f.is_open())
+    {
+        std::fprintf(stderr, "Warning: cannot write CUTLASS55 tactic file %s\n", path.c_str());
+        return;
+    }
+    f << cutlass55_tactic_key(m, n, k, group_size, act) << "config=" << config_name << ",avg_us=" << avg_us << "\n";
+}
+
 template <typename Element>
-void run_case(Args const& args)
+double run_case(Args const& args)
 {
     using namespace machete_standalone;
 
@@ -287,11 +365,7 @@ void run_case(Args const& args)
         std::exit(1);
     }
 
-    Cutlass55Config cutlass55_config = default_cutlass55_config();
-    if (is_cutlass55)
-    {
-        cutlass55_config = find_cutlass55_config(args.cutlass55_config);
-    }
+    int const group_size = args.group_size == -1 ? args.k : args.group_size;
 
     MacheteSchedule schedule{};
     if (!is_cutlass55 && args.schedule.empty())
@@ -309,7 +383,6 @@ void run_case(Args const& args)
         schedule = *parsed;
     }
 
-    int const group_size = args.group_size == -1 ? args.k : args.group_size;
     if (args.k % 64 != 0 || args.n % 128 != 0 || args.k % group_size != 0)
     {
         std::fprintf(stderr, "Invalid shape: K must be multiple of 64/group_size and N must be multiple of 128.\n");
@@ -331,6 +404,28 @@ void run_case(Args const& args)
     {
         std::fprintf(stderr, "Unsupported --quant=%s\n", args.quant.c_str());
         std::exit(1);
+    }
+
+    Cutlass55Config cutlass55_config = default_cutlass55_config();
+    if (is_cutlass55)
+    {
+        std::string config_name = args.cutlass55_config;
+        if (!args.cutlass55_tactic_file.empty())
+        {
+            std::string cached_config;
+            if (load_cutlass55_tactic(
+                    args.cutlass55_tactic_file, args.m, args.n, args.k, group_size, args.act, cached_config))
+            {
+                std::printf("cutlass55 tactic cache HIT from %s: %s\n", args.cutlass55_tactic_file.c_str(),
+                    cached_config.c_str());
+                config_name = cached_config;
+            }
+            else
+            {
+                std::printf("cutlass55 tactic cache MISS from %s\n", args.cutlass55_tactic_file.c_str());
+            }
+        }
+        cutlass55_config = find_cutlass55_config(config_name);
     }
 
     std::printf("m=%d n=%d k=%d group_size=%d backend=%s act=%s quant=%s\n", args.m, args.n, args.k, args.group_size,
@@ -368,18 +463,9 @@ void run_case(Args const& args)
     std::vector<Element> h_scales(static_cast<size_t>(args.k / group_size) * args.n);
     std::vector<Element> h_zeros(static_cast<size_t>(args.k / group_size) * args.n);
     std::vector<Element> h_out(static_cast<size_t>(args.m) * args.n);
-    std::vector<Element> h_c;
-    if (is_cutlass55)
-    {
-        h_c.resize(static_cast<size_t>(args.m) * args.n);
-    }
     for (size_t i = 0; i < h_a.size(); ++i)
     {
         h_a[i] = make_value<Element>(i, 0.01f);
-    }
-    for (size_t i = 0; i < h_c.size(); ++i)
-    {
-        h_c[i] = make_value<Element>(i, 0.01f);
     }
     for (size_t i = 0; i < h_scales.size(); ++i)
     {
@@ -397,24 +483,18 @@ void run_case(Args const& args)
     Element* d_a = nullptr;
     Element* d_scales = nullptr;
     Element* d_zeros = nullptr;
-    Element* d_c = nullptr;
     Element* d_out = nullptr;
     uint32_t* d_b_raw = nullptr;
     uint32_t* d_b_prepacked = nullptr;
 
     size_t const a_bytes = h_a.size() * sizeof(Element);
     size_t const scales_bytes = h_scales.size() * sizeof(Element);
-    size_t const c_bytes = h_c.size() * sizeof(Element);
     size_t const out_bytes = h_out.size() * sizeof(Element);
     size_t const b_bytes = b_words * sizeof(uint32_t);
 
     check_cuda(cudaMalloc(&d_a, a_bytes), "cudaMalloc d_a");
     check_cuda(cudaMalloc(&d_scales, scales_bytes), "cudaMalloc d_scales");
     check_cuda(cudaMalloc(&d_zeros, scales_bytes), "cudaMalloc d_zeros");
-    if (is_cutlass55)
-    {
-        check_cuda(cudaMalloc(&d_c, c_bytes), "cudaMalloc d_c");
-    }
     check_cuda(cudaMalloc(&d_out, out_bytes), "cudaMalloc d_out");
     if (!args.offline_prepack)
     {
@@ -424,10 +504,6 @@ void run_case(Args const& args)
     check_cuda(cudaMemcpy(d_a, h_a.data(), a_bytes, cudaMemcpyHostToDevice), "cudaMemcpy d_a");
     check_cuda(cudaMemcpy(d_scales, h_scales.data(), scales_bytes, cudaMemcpyHostToDevice), "cudaMemcpy d_scales");
     check_cuda(cudaMemcpy(d_zeros, h_zeros.data(), scales_bytes, cudaMemcpyHostToDevice), "cudaMemcpy d_zeros");
-    if (is_cutlass55)
-    {
-        check_cuda(cudaMemcpy(d_c, h_c.data(), c_bytes, cudaMemcpyHostToDevice), "cudaMemcpy d_c");
-    }
     if (offline_prepack_from_file)
     {
         std::vector<uint32_t> h_b_prepacked = read_prepacked_file(args.offline_prepack_path, b_bytes);
@@ -513,7 +589,7 @@ void run_case(Args const& args)
         if (is_cutlass55)
         {
             workspace_bytes = cutlass55_get_workspace_size_fp16_s4(d_a,
-                reinterpret_cast<cutlass::int4b_t const*>(d_b_prepacked), d_scales, d_c, d_out, args.m, args.n,
+                reinterpret_cast<cutlass::int4b_t const*>(d_b_prepacked), d_scales, nullptr, d_out, args.m, args.n,
                 args.k, args.group_size, cutlass55_config);
         }
         else if (is_gptq)
@@ -534,7 +610,7 @@ void run_case(Args const& args)
         if (is_cutlass55)
         {
             workspace_bytes = cutlass55_get_workspace_size_bf16_s4(d_a,
-                reinterpret_cast<cutlass::int4b_t const*>(d_b_prepacked), d_scales, d_c, d_out, args.m, args.n,
+                reinterpret_cast<cutlass::int4b_t const*>(d_b_prepacked), d_scales, nullptr, d_out, args.m, args.n,
                 args.k, args.group_size, cutlass55_config);
         }
         else if (is_gptq)
@@ -563,13 +639,13 @@ void run_case(Args const& args)
         if constexpr (std::is_same_v<Element, cutlass::half_t>)
         {
             cutlass55_plan = cutlass55_create_plan_fp16_s4(stream, d_a,
-                reinterpret_cast<cutlass::int4b_t const*>(d_b_prepacked), d_scales, d_c, d_out, args.m, args.n,
+                reinterpret_cast<cutlass::int4b_t const*>(d_b_prepacked), d_scales, nullptr, d_out, args.m, args.n,
                 args.k, args.group_size, cutlass55_config, d_workspace, workspace_bytes);
         }
         else
         {
             cutlass55_plan = cutlass55_create_plan_bf16_s4(stream, d_a,
-                reinterpret_cast<cutlass::int4b_t const*>(d_b_prepacked), d_scales, d_c, d_out, args.m, args.n,
+                reinterpret_cast<cutlass::int4b_t const*>(d_b_prepacked), d_scales, nullptr, d_out, args.m, args.n,
                 args.k, args.group_size, cutlass55_config, d_workspace, workspace_bytes);
         }
     }
@@ -658,6 +734,11 @@ void run_case(Args const& args)
     }
     std::printf("Avg kernel time: %.3f us (%.1f TFLOPS, %d iters, %d warmup)\n", avg_us, flops / (avg_us * 1e-6) / 1e12,
         args.iters, args.warmup);
+    if (is_cutlass55 && !args.save_cutlass55_tactic_file.empty())
+    {
+        save_cutlass55_tactic(args.save_cutlass55_tactic_file, args.m, args.n, args.k, group_size, args.act,
+            cutlass55_config.name, avg_us);
+    }
 
     check_cuda(cudaEventDestroy(start), "cudaEventDestroy start");
     check_cuda(cudaEventDestroy(stop), "cudaEventDestroy stop");
@@ -670,16 +751,13 @@ void run_case(Args const& args)
     check_cuda(cudaFree(d_a), "cudaFree d_a");
     check_cuda(cudaFree(d_scales), "cudaFree d_scales");
     check_cuda(cudaFree(d_zeros), "cudaFree d_zeros");
-    if (d_c)
-    {
-        check_cuda(cudaFree(d_c), "cudaFree d_c");
-    }
     check_cuda(cudaFree(d_out), "cudaFree d_out");
     if (d_b_raw)
     {
         check_cuda(cudaFree(d_b_raw), "cudaFree d_b_raw");
     }
     check_cuda(cudaFree(d_b_prepacked), "cudaFree d_b_prepacked");
+    return avg_us;
 }
 
 } // namespace
@@ -711,14 +789,14 @@ int main(int argc, char** argv)
 
     try
     {
-        auto run_one = [](Args const& run_args) {
+        auto run_one = [](Args const& run_args) -> double {
             if (run_args.act == "fp16")
             {
-                run_case<cutlass::half_t>(run_args);
+                return run_case<cutlass::half_t>(run_args);
             }
             else if (run_args.act == "bf16")
             {
-                run_case<cutlass::bfloat16_t>(run_args);
+                return run_case<cutlass::bfloat16_t>(run_args);
             }
             else
             {
@@ -731,12 +809,28 @@ int main(int argc, char** argv)
         {
             args.backend = "cutlass55";
             auto configs = machete_standalone::supported_cutlass55_configs();
+            double best_us = std::numeric_limits<double>::infinity();
+            std::string best_config;
             for (auto const& config : configs)
             {
                 Args run_args = args;
                 run_args.cutlass55_config = config.name;
+                run_args.cutlass55_tactic_file.clear();
+                run_args.save_cutlass55_tactic_file.clear();
                 std::printf("\n===== CUTLASS55 config: %s =====\n", config.name);
-                run_one(run_args);
+                double const avg_us = run_one(run_args);
+                if (avg_us < best_us)
+                {
+                    best_us = avg_us;
+                    best_config = config.name;
+                }
+            }
+            std::printf("\nBest CUTLASS55 config: %s avg_us=%.3f\n", best_config.c_str(), best_us);
+            int const group_size = args.group_size == -1 ? args.k : args.group_size;
+            if (!args.save_cutlass55_tactic_file.empty())
+            {
+                save_cutlass55_tactic(
+                    args.save_cutlass55_tactic_file, args.m, args.n, args.k, group_size, args.act, best_config, best_us);
             }
             return 0;
         }
